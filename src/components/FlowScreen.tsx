@@ -11,7 +11,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ayah, Surah } from "../api";
-import { colors, radii, cardShadow, serif } from "../theme";
+import { radii, serif, useTheme, useThemedStyles } from "../theme";
 
 type Props = {
   surah: Surah;
@@ -48,8 +48,9 @@ function Toggle({
   value: boolean;
   onToggle: () => void;
 }) {
+  const styles = useThemedStyles(createStyles);
   return (
-    <Pressable style={styles.toggleRow} onPress={onToggle}>
+    <Pressable style={styles.toggleRow} onPress={onToggle} accessibilityRole="switch" accessibilityState={{ checked: value }}>
       <Text style={styles.toggleIcon}>{icon}</Text>
       <Text style={styles.toggleLabel}>{label}</Text>
       <View style={[styles.toggleTrack, value && styles.toggleTrackOn]}>
@@ -59,7 +60,7 @@ function Toggle({
   );
 }
 
-export default function FlowScreen({
+const FlowScreen = React.memo(function FlowScreen({
   surah,
   ayahs,
   index,
@@ -81,6 +82,8 @@ export default function FlowScreen({
   onOpenDownloadManager,
 }: Props) {
   const insets = useSafeAreaInsets();
+  const styles = useThemedStyles(createStyles);
+  const { palette: c } = useTheme();
   const currentAyah = ayahs[index];
   const arabicGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 7] });
   const englishGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 6] });
@@ -91,16 +94,16 @@ export default function FlowScreen({
 
   const stageStatus =
     stage === "arabic"
-      ? { text: "Arabic recitation", color: colors.accent }
+      ? { text: "Arabic recitation", color: c.accent }
       : stage === "english"
-        ? { text: "English meaning", color: colors.accent2 }
-        : { text: "Tap play to begin", color: colors.muted };
+        ? { text: "English meaning", color: c.accent2 }
+        : { text: "Tap play to begin", color: c.muted };
 
   return (
     <View style={styles.screen}>
-      <View style={[styles.header, { paddingTop: insets.top }]}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <View style={styles.headerRow}>
-          <Pressable style={styles.iconBtn} onPress={onBack}>
+          <Pressable style={styles.iconBtn} onPress={onBack} hitSlop={6} accessibilityLabel="Back">
             <Text style={styles.backGlyph}>‹</Text>
           </Pressable>
           <View style={styles.headerCenter}>
@@ -114,10 +117,15 @@ export default function FlowScreen({
           <View style={styles.headerRight}>
             {downloading && (
               <View style={styles.downloadingIndicator}>
-                <ActivityIndicator size="small" color={colors.accent} />
+                <ActivityIndicator size="small" color={c.accent} />
               </View>
             )}
-            <Pressable style={styles.iconBtn} onPress={onBookmark}>
+            <Pressable
+              style={styles.iconBtn}
+              onPress={onBookmark}
+              hitSlop={6}
+              accessibilityLabel={isBookmarked ? "Remove bookmark" : "Bookmark ayah"}
+            >
               <Text style={[styles.star, isBookmarked && styles.starActive]}>
                 {isBookmarked ? "★" : "☆"}
               </Text>
@@ -151,7 +159,7 @@ export default function FlowScreen({
             style={[
               styles.arabic,
               {
-                textShadowColor: stage === "arabic" ? colors.accentGlow : "transparent",
+                textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
                 textShadowRadius: arabicGlow,
               },
             ]}
@@ -166,7 +174,7 @@ export default function FlowScreen({
             style={[
               styles.translation,
               {
-                textShadowColor: stage === "english" ? colors.accent2Glow : "transparent",
+                textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
                 textShadowRadius: englishGlow,
               },
             ]}
@@ -208,15 +216,20 @@ export default function FlowScreen({
         </View>
 
         <View style={styles.controls}>
-          <Pressable style={styles.secondaryBtn} onPress={onPrevious}>
+          <Pressable style={styles.secondaryBtn} onPress={onPrevious} hitSlop={6} accessibilityLabel="Previous ayah">
             <Text style={styles.secondaryGlyph}>‹</Text>
           </Pressable>
 
-          <Pressable style={styles.primaryBtn} onPress={onTogglePlay}>
+          <Pressable
+            style={styles.primaryBtn}
+            onPress={onTogglePlay}
+            hitSlop={6}
+            accessibilityLabel={playing ? "Pause" : "Play"}
+          >
             <Text style={styles.primaryGlyph}>{playing ? "❚❚" : "▶"}</Text>
           </Pressable>
 
-          <Pressable style={styles.secondaryBtn} onPress={onNext}>
+          <Pressable style={styles.secondaryBtn} onPress={onNext} hitSlop={6} accessibilityLabel="Next ayah">
             <Text style={styles.secondaryGlyph}>›</Text>
           </Pressable>
         </View>
@@ -225,7 +238,7 @@ export default function FlowScreen({
           <Text style={styles.downloadBtnText}>⬇ Download Audio</Text>
         </Pressable>
 
-        <Pressable style={styles.repeatBtn} onPress={onRepeat}>
+        <Pressable style={styles.repeatBtn} onPress={onRepeat} hitSlop={8}>
           <Text style={styles.repeatText}>↻ Repeat ayah</Text>
         </Pressable>
 
@@ -236,315 +249,324 @@ export default function FlowScreen({
       </ScrollView>
     </View>
   );
-}
-
-const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: colors.bg,
-  },
-  header: {
-    backgroundColor: colors.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.line,
-  },
-  headerRow: {
-    height: 56,
-    paddingHorizontal: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  iconBtn: {
-    width: 16,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.bg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  backGlyph: {
-    fontSize: 26,
-    lineHeight: 28,
-    color: colors.ink,
-    marginTop: -2,
-  },
-  star: {
-    fontSize: 19,
-    color: colors.muted,
-  },
-  starActive: {
-    color: colors.accent,
-  },
-  headerCenter: {
-    flex: 1,
-    alignItems: "center",
-    paddingHorizontal: 8,
-  },
-  headerRight: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  downloadingIndicator: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.accentSoft,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  surahName: {
-    fontFamily: serif,
-    fontSize: 17,
-    fontWeight: "700",
-    color: colors.ink,
-  },
-  progressLabel: {
-    fontSize: 11,
-    color: colors.muted,
-    marginTop: 1,
-  },
-  progressTrack: {
-    height: 3,
-    backgroundColor: colors.bg,
-  },
-  progressFill: {
-    height: 3,
-    backgroundColor: colors.accent,
-  },
-  content: {
-    padding: 20,
-    paddingBottom: 44,
-  },
-  card: {
-    marginTop: 14,
-    borderRadius: radii.card,
-    backgroundColor: colors.surface,
-    padding: 22,
-    borderWidth: 1,
-    borderColor: colors.line,
-    ...cardShadow,
-  },
-  cardActive: {
-    borderColor: colors.accentBorder,
-  },
-  cardTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 20,
-  },
-  ayahPill: {
-    backgroundColor: colors.bg,
-    borderRadius: radii.pill,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-  },
-  ayahPillText: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: colors.inkSoft,
-    letterSpacing: 0.4,
-  },
-  stagePill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    borderRadius: radii.pill,
-    paddingHorizontal: 11,
-    paddingVertical: 5,
-  },
-  stageDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#FFFFFF",
-  },
-  stagePillText: {
-    color: "#FFFFFF",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  arabic: {
-    fontSize: 32,
-    lineHeight: 58,
-    textAlign: "right",
-    color: colors.ink,
-    fontWeight: "500",
-  },
-  divider: {
-    height: 1,
-    backgroundColor: colors.line,
-    marginVertical: 20,
-  },
-  translation: {
-    fontSize: 17.5,
-    lineHeight: 29,
-    color: colors.inkSoft,
-  },
-  settingsCard: {
-    marginTop: 16,
-    backgroundColor: colors.surface,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  settingsTitle: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: colors.muted,
-    letterSpacing: 1.2,
-    textTransform: "uppercase",
-    marginBottom: 6,
-  },
-  togglesRow: {
-    flexDirection: "row",
-    gap: 14,
-  },
-  toggleRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 6,
-  },
-  toggleIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: colors.bg,
-    textAlign: "center",
-    lineHeight: 30,
-    fontSize: 13,
-    fontWeight: "700",
-    color: colors.inkSoft,
-    overflow: "hidden",
-  },
-  toggleLabel: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "600",
-    color: colors.ink,
-  },
-  toggleTrack: {
-    width: 40,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: colors.line,
-    justifyContent: "center",
-    paddingHorizontal: 3,
-  },
-  toggleTrackOn: {
-    backgroundColor: colors.accentSoft,
-  },
-  toggleKnob: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: "#FFFFFF",
-  },
-  toggleKnobOn: {
-    alignSelf: "flex-end",
-    backgroundColor: colors.accent,
-  },
-  speedGroup: {
-    flexDirection: "row",
-    alignSelf: "center",
-    backgroundColor: colors.surface,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: colors.line,
-    padding: 4,
-    gap: 2,
-    marginTop: 18,
-  },
-  speedItem: {
-    paddingHorizontal: 13,
-    paddingVertical: 7,
-    borderRadius: 14,
-  },
-  speedItemActive: {
-    backgroundColor: colors.ink,
-  },
-  speedText: {
-    color: colors.muted,
-    fontSize: 12.5,
-    fontWeight: "600",
-  },
-  speedTextActive: {
-    color: "#FFFFFF",
-  },
-  controls: {
-    marginTop: 20,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 20,
-  },
-  secondaryBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  secondaryGlyph: {
-    fontSize: 30,
-    color: colors.ink,
-    marginTop: -3,
-  },
-  primaryBtn: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
-    backgroundColor: colors.accent,
-    justifyContent: "center",
-    alignItems: "center",
-    ...cardShadow,
-  },
-  primaryGlyph: {
-    color: "#FFFFFF",
-    fontSize: 26,
-  },
-  repeatBtn: {
-    alignSelf: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    marginTop: 16,
-  },
-  repeatText: {
-    color: colors.inkSoft,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  downloadBtn: {
-    backgroundColor: colors.surface,
-    borderRadius: radii.card,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    alignItems: "center",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    marginTop: 8,
-  },
-  downloadBtnText: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: colors.ink,
-  },
-  sourceNote: {
-    textAlign: "center",
-    color: colors.muted,
-    fontSize: 11,
-    lineHeight: 17,
-    marginTop: 26,
-  },
 });
+
+export default FlowScreen;
+
+function createStyles(t: ReturnType<typeof useTheme>) {
+  const { palette: c } = t;
+  return StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: c.bg,
+    },
+    header: {
+      backgroundColor: c.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.line,
+    },
+    headerRow: {
+      height: 56,
+      paddingHorizontal: 16,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    iconBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: c.well,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    backGlyph: {
+      fontSize: 26,
+      lineHeight: 28,
+      color: c.ink,
+      marginTop: -2,
+    },
+    star: {
+      fontSize: 19,
+      color: c.muted,
+    },
+    starActive: {
+      color: c.accent,
+    },
+    headerCenter: {
+      flex: 1,
+      alignItems: "center",
+      paddingHorizontal: 8,
+    },
+    headerRight: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    downloadingIndicator: {
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      backgroundColor: c.accentSoft,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    surahName: {
+      fontFamily: serif,
+      fontSize: 17,
+      fontWeight: "700",
+      color: c.ink,
+    },
+    progressLabel: {
+      fontSize: 11,
+      color: c.muted,
+      marginTop: 1,
+    },
+    progressTrack: {
+      height: 3,
+      backgroundColor: c.bg,
+    },
+    progressFill: {
+      height: 3,
+      backgroundColor: c.accent,
+    },
+    content: {
+      padding: 20,
+      paddingBottom: 44,
+    },
+    card: {
+      marginTop: 14,
+      borderRadius: radii.card,
+      backgroundColor: c.surface,
+      padding: 22,
+      borderWidth: 1,
+      borderColor: c.line,
+      ...t.shadow,
+    },
+    cardActive: {
+      borderColor: c.accentBorder,
+    },
+    cardTop: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 20,
+    },
+    ayahPill: {
+      backgroundColor: c.well,
+      borderRadius: radii.pill,
+      paddingHorizontal: 12,
+      paddingVertical: 5,
+    },
+    ayahPillText: {
+      fontSize: 11,
+      fontWeight: "700",
+      color: c.inkSoft,
+      letterSpacing: 0.4,
+    },
+    stagePill: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      borderRadius: radii.pill,
+      paddingHorizontal: 11,
+      paddingVertical: 5,
+    },
+    stageDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: "#FFFFFF",
+    },
+    stagePillText: {
+      color: "#FFFFFF",
+      fontSize: 11,
+      fontWeight: "600",
+    },
+    arabic: {
+      fontSize: 32,
+      lineHeight: 58,
+      textAlign: "right",
+      color: c.ink,
+      fontWeight: "500",
+    },
+    divider: {
+      height: 1,
+      backgroundColor: c.line,
+      marginVertical: 20,
+    },
+    translation: {
+      fontSize: 17.5,
+      lineHeight: 29,
+      color: c.inkSoft,
+    },
+    settingsCard: {
+      marginTop: 16,
+      backgroundColor: c.surface,
+      borderRadius: radii.card,
+      borderWidth: 1,
+      borderColor: c.line,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+    },
+    settingsTitle: {
+      fontSize: 11,
+      fontWeight: "700",
+      color: c.muted,
+      letterSpacing: 1.2,
+      textTransform: "uppercase",
+      marginBottom: 6,
+    },
+    togglesRow: {
+      flexDirection: "row",
+      gap: 14,
+    },
+    toggleRow: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingVertical: 6,
+    },
+    toggleIcon: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      backgroundColor: c.well,
+      textAlign: "center",
+      lineHeight: 30,
+      fontSize: 13,
+      fontWeight: "700",
+      color: c.inkSoft,
+      overflow: "hidden",
+    },
+    toggleLabel: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: "600",
+      color: c.ink,
+    },
+    toggleTrack: {
+      width: 40,
+      height: 24,
+      borderRadius: 12,
+      backgroundColor: c.lineStrong,
+      justifyContent: "center",
+      paddingHorizontal: 3,
+    },
+    toggleTrackOn: {
+      backgroundColor: c.accentSoft,
+    },
+    toggleKnob: {
+      width: 18,
+      height: 18,
+      borderRadius: 9,
+      backgroundColor: "#FFFFFF",
+      ...t.shadow,
+      shadowRadius: 4,
+      shadowOffset: { width: 0, height: 1 },
+      elevation: 2,
+    },
+    toggleKnobOn: {
+      alignSelf: "flex-end",
+      backgroundColor: c.accent,
+    },
+    speedGroup: {
+      flexDirection: "row",
+      alignSelf: "center",
+      backgroundColor: c.surface,
+      borderRadius: radii.control,
+      borderWidth: 1,
+      borderColor: c.line,
+      padding: 4,
+      gap: 2,
+      marginTop: 18,
+    },
+    speedItem: {
+      paddingHorizontal: 13,
+      paddingVertical: 7,
+      borderRadius: radii.control - 8,
+    },
+    speedItemActive: {
+      backgroundColor: c.ink,
+    },
+    speedText: {
+      color: c.muted,
+      fontSize: 12.5,
+      fontWeight: "600",
+    },
+    speedTextActive: {
+      color: c.bg,
+    },
+    controls: {
+      marginTop: 20,
+      flexDirection: "row",
+      justifyContent: "center",
+      alignItems: "center",
+      gap: 20,
+    },
+    secondaryBtn: {
+      width: 52,
+      height: 52,
+      borderRadius: 26,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.line,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    secondaryGlyph: {
+      fontSize: 30,
+      color: c.ink,
+      marginTop: -3,
+    },
+    primaryBtn: {
+      width: 74,
+      height: 74,
+      borderRadius: 37,
+      backgroundColor: c.accent,
+      justifyContent: "center",
+      alignItems: "center",
+      ...t.shadow,
+    },
+    primaryGlyph: {
+      color: c.onAccent,
+      fontSize: 26,
+    },
+    repeatBtn: {
+      alignSelf: "center",
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      marginTop: 16,
+    },
+    repeatText: {
+      color: c.inkSoft,
+      fontSize: 14,
+      fontWeight: "600",
+    },
+    downloadBtn: {
+      backgroundColor: c.surface,
+      borderRadius: radii.card,
+      paddingVertical: 14,
+      paddingHorizontal: 20,
+      alignItems: "center",
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      marginTop: 8,
+    },
+    downloadBtnText: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: c.ink,
+    },
+    sourceNote: {
+      textAlign: "center",
+      color: c.muted,
+      fontSize: 11,
+      lineHeight: 17,
+      marginTop: 26,
+    },
+  });
+}

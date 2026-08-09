@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback, useMemo } from "react";
 import {
   ActivityIndicator,
   DimensionValue,
@@ -6,48 +6,202 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { Surah } from "../api";
-import { colors, radii, serif } from "../theme";
-import { getDownloadManager } from "../downloadManager";
+import { radii, serif, useTheme, useThemedStyles } from "../theme";
 
 type Props = {
   surahs: Surah[];
   last: { surah: number; ayahIndex: number } | null;
   progress: Record<number, number>;
   downloadingSurahs: Set<number>;
+  bookmarksCount: number;
   onOpenSurah: (number: number, resumeIndex?: number) => void;
   onOpenDownloadManager: (surahNumber: number) => void;
+  onOpenSettings: () => void;
+  onOpenBookmarks: () => void;
 };
 
-export default function HomeScreen({ surahs, last, progress, downloadingSurahs, onOpenSurah, onOpenDownloadManager }: Props) {
+const ROW_HEIGHT = 68;
+
+type RowProps = {
+  item: Surah;
+  heard: number | undefined;
+  downloading: boolean;
+  onOpen: (number: number, resumeIndex?: number) => void;
+  onDownload: (surahNumber: number) => void;
+};
+
+const SurahRow = React.memo(function SurahRow({
+  item,
+  heard,
+  downloading,
+  onOpen,
+  onDownload,
+}: RowProps) {
+  const styles = useThemedStyles(createStyles);
+
+  const pct: DimensionValue =
+    heard !== undefined && item.numberOfAyahs > 0
+      ? `${Math.min(100, ((heard + 1) / item.numberOfAyahs) * 100)}%`
+      : "0%";
+
+  return (
+    <View style={styles.row}>
+      <Pressable
+        style={({ pressed }) => [styles.rowInner, pressed && styles.rowPressed]}
+        onPress={() => onOpen(item.number)}
+        android_ripple={{ color: styles.ripple.color, borderless: false }}
+      >
+        <View style={styles.numCircle}>
+          <Text style={styles.numText}>{item.number}</Text>
+        </View>
+        <View style={styles.rowText}>
+          <Text style={styles.rowName} numberOfLines={1}>
+            {item.englishName}
+          </Text>
+          <Text style={styles.rowSub} numberOfLines={1}>
+            {heard !== undefined
+              ? `${item.englishNameTranslation} · Ayah ${heard + 1} of ${item.numberOfAyahs}`
+              : item.englishNameTranslation}
+          </Text>
+        </View>
+        <Text style={styles.rowArabic}>{item.name}</Text>
+        {downloading ? (
+          <View style={styles.downloadingBadge}>
+            <ActivityIndicator size="small" color={styles.accentColor.color} />
+          </View>
+        ) : (
+          <Pressable
+            style={styles.downloadBtn}
+            onPress={() => onDownload(item.number)}
+            hitSlop={6}
+          >
+            <Text style={styles.downloadIcon}>⬇</Text>
+          </Pressable>
+        )}
+      </Pressable>
+      {heard !== undefined && (
+        <View style={styles.rowTrack}>
+          <View style={[styles.rowFill, { width: pct }]} />
+        </View>
+      )}
+    </View>
+  );
+});
+
+export default function HomeScreen({
+  surahs,
+  last,
+  progress,
+  downloadingSurahs,
+  bookmarksCount,
+  onOpenSurah,
+  onOpenDownloadManager,
+  onOpenSettings,
+  onOpenBookmarks,
+}: Props) {
+  const styles = useThemedStyles(createStyles);
+  const { palette: c, isDark } = useTheme();
+  const [query, setQuery] = React.useState("");
+
   const resumeSurah = last ? surahs.find((s) => s.number === last.surah) : undefined;
   const resumeTotal = resumeSurah?.numberOfAyahs ?? 0;
   const resumePct: DimensionValue =
     resumeTotal > 0 ? `${Math.min(100, ((last!.ayahIndex + 1) / resumeTotal) * 100)}%` : "0%";
 
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return surahs;
+    return surahs.filter((s) => {
+      return (
+        s.englishName.toLowerCase().includes(q) ||
+        s.englishNameTranslation.toLowerCase().includes(q) ||
+        s.name.toLowerCase().includes(q) ||
+        String(s.number) === q
+      );
+    });
+  }, [surahs, query]);
+
+  const renderItem = useCallback(
+    ({ item }: { item: Surah }) => (
+      <SurahRow
+        item={item}
+        heard={progress[item.number]}
+        downloading={downloadingSurahs.has(item.number)}
+        onOpen={onOpenSurah}
+        onDownload={onOpenDownloadManager}
+      />
+    ),
+    [progress, downloadingSurahs, onOpenSurah, onOpenDownloadManager]
+  );
+
   const header = (
-    <View>
+    <View style={styles.headerWrap}>
       <View style={styles.header}>
-        <Text style={styles.eyebrow}>QUR'AN, IN FLOW</Text>
-        <Text style={styles.brand}>Ayah Flow</Text>
-        <Text style={styles.tagline}>Hear the recitation, read the meaning.</Text>
+        <View style={styles.headerText}>
+          <Text style={styles.eyebrow}>QUR'AN, IN FLOW</Text>
+          <Text style={styles.brand}>Ayat Flow</Text>
+          <Text style={styles.tagline}>Hear the recitation, read the meaning.</Text>
+        </View>
+        <View style={styles.headerActions}>
+          <Pressable
+            style={styles.iconBtn}
+            onPress={onOpenBookmarks}
+            hitSlop={6}
+            accessibilityLabel="Bookmarks"
+          >
+            <Text style={styles.iconGlyph}>★</Text>
+            {bookmarksCount > 0 && (
+              <View style={styles.iconBadge}>
+                <Text style={styles.iconBadgeText}>
+                  {bookmarksCount > 99 ? "99+" : bookmarksCount}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+          <Pressable
+            style={styles.iconBtn}
+            onPress={onOpenSettings}
+            hitSlop={6}
+            accessibilityLabel="Settings"
+          >
+            <Text style={styles.iconGlyph}>⚙</Text>
+          </Pressable>
+        </View>
       </View>
 
-      {last && (
-        <Pressable
-          style={styles.resume}
-          onPress={() => onOpenSurah(last.surah, last.ayahIndex)}
-        >
+      <View style={[styles.searchBox, isDark && styles.searchBoxDark]}>
+        <Text style={styles.searchGlyph}>🔍</Text>
+        <TextInput
+          style={styles.searchInput}
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search surahs, meanings…"
+          placeholderTextColor={c.muted}
+          autoCorrect={false}
+          autoCapitalize="none"
+          returnKeyType="search"
+        />
+        {query.length > 0 && (
+          <Pressable onPress={() => setQuery("")} hitSlop={8}>
+            <Text style={styles.searchClear}>✕</Text>
+          </Pressable>
+        )}
+      </View>
+
+      {last && !query && (
+        <Pressable style={styles.resume} onPress={() => onOpenSurah(last.surah, last.ayahIndex)}>
           <View style={styles.resumeTop}>
             <View style={styles.resumeLeft}>
-              <Text style={styles.resumeEyebrow}>CONTINUE</Text>
+              <Text style={styles.resumeEyebrow}>CONTINUE LISTENING</Text>
               <Text style={styles.resumeTitle}>
                 {resumeSurah?.englishName ?? `Surah ${last.surah}`}
               </Text>
               <Text style={styles.resumeMeta}>
-                Ayah {last.ayahIndex + 1} of {resumeTotal}
+                Ayah {last.ayahIndex + 1} of {resumeTotal} · Tap to resume
               </Text>
             </View>
             <View style={styles.playBadge}>
@@ -61,9 +215,9 @@ export default function HomeScreen({ surahs, last, progress, downloadingSurahs, 
       )}
 
       <View style={styles.sectionRow}>
-        <Text style={styles.sectionTitle}>Surahs</Text>
+        <Text style={styles.sectionTitle}>{query ? "Results" : "Surahs"}</Text>
         <View style={styles.countPill}>
-          <Text style={styles.countText}>{surahs.length}</Text>
+          <Text style={styles.countText}>{filtered.length}</Text>
         </View>
       </View>
     </View>
@@ -71,263 +225,341 @@ export default function HomeScreen({ surahs, last, progress, downloadingSurahs, 
 
   return (
     <FlatList
-      data={surahs}
+      data={filtered}
       keyExtractor={(s) => String(s.number)}
-      renderItem={({ item }) => {
-        const heard = progress[item.number];
-        const pct: DimensionValue =
-          heard !== undefined && item.numberOfAyahs > 0
-            ? `${Math.min(100, ((heard + 1) / item.numberOfAyahs) * 100)}%`
-            : "0%";
-
-        return (
-          <Pressable
-            style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-            onPress={() => onOpenSurah(item.number)}
-          >
-            <View style={styles.rowInner}>
-              <View style={styles.numCircle}>
-                <Text style={styles.numText}>{item.number}</Text>
-              </View>
-              <View style={styles.rowText}>
-                <Text style={styles.rowName}>{item.englishName}</Text>
-                <Text style={styles.rowSub} numberOfLines={1}>
-                  {heard !== undefined
-                    ? `${item.englishNameTranslation} · Ayah ${heard + 1} of ${item.numberOfAyahs}`
-                    : item.englishNameTranslation}
-                </Text>
-              </View>
-              <Text style={styles.rowArabic}>{item.name}</Text>
-              {downloadingSurahs.has(item.number) ? (
-                <View style={styles.downloadingBadge}>
-                  <ActivityIndicator size="small" color={colors.accent} />
-                </View>
-              ) : (
-                <Pressable 
-                  style={styles.downloadBtn}
-                  onPress={() => onOpenDownloadManager(item.number)}
-                >
-                  <Text style={styles.downloadIcon}>⬇</Text>
-                </Pressable>
-              )}
-            </View>
-            {heard !== undefined && (
-              <View style={styles.rowTrack}>
-                <View style={[styles.rowFill, { width: pct }]} />
-              </View>
-            )}
-          </Pressable>
-        );
-      }}
+      renderItem={renderItem}
       ListHeaderComponent={header}
+      ListEmptyComponent={
+        <View style={styles.empty}>
+          <Text style={styles.emptyGlyph}>🕌</Text>
+          <Text style={styles.emptyTitle}>No surahs found</Text>
+          <Text style={styles.emptySub}>Try a different search term.</Text>
+        </View>
+      }
       contentContainerStyle={styles.list}
       showsVerticalScrollIndicator={false}
       ItemSeparatorComponent={() => <View style={styles.separator} />}
+      getItemLayout={(_, i) => ({ length: ROW_HEIGHT, offset: ROW_HEIGHT * i, index: i })}
+      initialNumToRender={14}
+      maxToRenderPerBatch={12}
+      windowSize={7}
+      removeClippedSubviews={false}
+      keyboardDismissMode="on-drag"
+      keyboardShouldPersistTaps="handled"
     />
   );
 }
 
-const styles = StyleSheet.create({
-  list: {
-    paddingHorizontal: 22,
-    paddingTop: 22,
-    paddingBottom: 48,
-  },
-  header: {
-    paddingTop: 10,
-    paddingBottom: 26,
-  },
-  eyebrow: {
-    color: colors.accent,
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 2.2,
-    marginBottom: 8,
-  },
-  brand: {
-    fontFamily: serif,
-    fontSize: 38,
-    fontWeight: "700",
-    letterSpacing: -0.8,
-    color: colors.ink,
-  },
-  tagline: {
-    marginTop: 6,
-    fontSize: 15,
-    color: colors.muted,
-  },
-  resume: {
-    backgroundColor: colors.dark,
-    borderRadius: radii.card,
-    padding: 20,
-    paddingBottom: 16,
-    marginBottom: 30,
-  },
-  resumeTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  resumeLeft: {
-    flex: 1,
-    paddingRight: 12,
-  },
-  resumeEyebrow: {
-    color: colors.accentSoft,
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 1.8,
-  },
-  resumeTitle: {
-    fontFamily: serif,
-    color: "#FFFFFF",
-    fontSize: 23,
-    fontWeight: "700",
-    marginTop: 6,
-  },
-  resumeMeta: {
-    color: "#A8A8B0",
-    fontSize: 13,
-    marginTop: 3,
-  },
-  playBadge: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: colors.accent,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  playBadgeGlyph: {
-    color: "#FFFFFF",
-    fontSize: 17,
-    marginLeft: 2,
-  },
-  resumeTrack: {
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: "#3A3A42",
-    marginTop: 16,
-    overflow: "hidden",
-  },
-  resumeFill: {
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: colors.accent,
-  },
-  sectionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 4,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: colors.ink,
-    letterSpacing: -0.3,
-  },
-  countPill: {
-    backgroundColor: colors.surface,
-    borderRadius: radii.pill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 9,
-    paddingVertical: 2,
-  },
-  countText: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  row: {
-    paddingBottom: 4,
-  },
-  rowPressed: {
-    opacity: 0.55,
-  },
-  rowInner: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 15,
-  },
-  numCircle: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.surface,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  numText: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: colors.inkSoft,
-  },
-  rowText: {
-    flex: 1,
-    marginLeft: 14,
-  },
-  rowName: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: colors.ink,
-    letterSpacing: -0.2,
-  },
-  rowSub: {
-    fontSize: 12.5,
-    color: colors.muted,
-    marginTop: 2,
-  },
-  rowArabic: {
-    fontFamily: serif,
-    fontSize: 19,
-    color: colors.inkSoft,
-    marginLeft: 10,
-  },
-  downloadBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: colors.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    justifyContent: "center",
-    alignItems: "center",
-    marginLeft: 8,
-  },
-  downloadIcon: {
-    fontSize: 14,
-    color: colors.muted,
-  },
-  downloadingBadge: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: colors.accentSoft,
-    justifyContent: "center",
-    alignItems: "center",
-    marginLeft: 8,
-  },
-  rowTrack: {
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: colors.line,
-    marginLeft: 48,
-    marginTop: 2,
-    marginBottom: 8,
-    overflow: "hidden",
-  },
-  rowFill: {
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: colors.accent,
-  },
-  separator: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.line,
-    marginLeft: 48,
-  },
-});
+function createStyles(t: ReturnType<typeof useTheme>) {
+  const { palette: c } = t;
+  return StyleSheet.create({
+    list: {
+      paddingHorizontal: 22,
+      paddingTop: 8,
+      paddingBottom: 48,
+    },
+    headerWrap: {
+      paddingBottom: 4,
+    },
+    header: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      paddingTop: 14,
+      paddingBottom: 18,
+    },
+    headerText: {
+      flex: 1,
+    },
+    eyebrow: {
+      color: c.accent,
+      fontSize: 11,
+      fontWeight: "700",
+      letterSpacing: 2.2,
+      marginBottom: 8,
+    },
+    brand: {
+      fontFamily: serif,
+      fontSize: 38,
+      fontWeight: "700",
+      letterSpacing: -0.8,
+      color: c.ink,
+    },
+    tagline: {
+      marginTop: 6,
+      fontSize: 15,
+      color: c.muted,
+    },
+    headerActions: {
+      flexDirection: "row",
+      gap: 10,
+      marginTop: 6,
+    },
+    iconBtn: {
+      width: 42,
+      height: 42,
+      borderRadius: 21,
+      backgroundColor: c.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      justifyContent: "center",
+      alignItems: "center",
+      ...t.shadow,
+      shadowOpacity: 0.4 * c.shadowOpacity,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 2,
+    },
+    iconGlyph: {
+      fontSize: 18,
+      color: c.inkSoft,
+    },
+    iconBadge: {
+      position: "absolute",
+      top: -5,
+      right: -5,
+      minWidth: 18,
+      height: 18,
+      borderRadius: 9,
+      backgroundColor: c.accent,
+      justifyContent: "center",
+      alignItems: "center",
+      paddingHorizontal: 4,
+    },
+    iconBadgeText: {
+      color: c.onAccent,
+      fontSize: 10,
+      fontWeight: "700",
+    },
+    searchBox: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.well,
+      borderRadius: radii.control,
+      paddingHorizontal: 16,
+      height: 48,
+      marginBottom: 20,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+    },
+    searchBoxDark: {},
+    searchGlyph: {
+      fontSize: 14,
+      marginRight: 10,
+    },
+    searchInput: {
+      flex: 1,
+      fontSize: 15,
+      color: c.ink,
+      paddingVertical: 0,
+      height: "100%",
+    },
+    searchClear: {
+      fontSize: 15,
+      color: c.muted,
+      paddingHorizontal: 4,
+    },
+    resume: {
+      backgroundColor: c.hero,
+      borderRadius: radii.card,
+      padding: 20,
+      paddingBottom: 16,
+      marginBottom: 26,
+      ...t.shadow,
+    },
+    resumeTop: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    resumeLeft: {
+      flex: 1,
+      paddingRight: 12,
+    },
+    resumeEyebrow: {
+      color: c.heroSub,
+      fontSize: 10,
+      fontWeight: "700",
+      letterSpacing: 1.8,
+    },
+    resumeTitle: {
+      fontFamily: serif,
+      color: c.heroInk,
+      fontSize: 23,
+      fontWeight: "700",
+      marginTop: 6,
+    },
+    resumeMeta: {
+      color: c.heroSub,
+      fontSize: 13,
+      marginTop: 3,
+    },
+    playBadge: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: c.accent,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    playBadgeGlyph: {
+      color: c.onAccent,
+      fontSize: 17,
+      marginLeft: 2,
+    },
+    resumeTrack: {
+      height: 3,
+      borderRadius: 2,
+      backgroundColor: c.heroSub + "55",
+      marginTop: 16,
+      overflow: "hidden",
+    },
+    resumeFill: {
+      height: 3,
+      borderRadius: 2,
+      backgroundColor: c.accent,
+    },
+    sectionRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 4,
+    },
+    sectionTitle: {
+      fontSize: 20,
+      fontWeight: "700",
+      color: c.ink,
+      letterSpacing: -0.3,
+    },
+    countPill: {
+      backgroundColor: c.surface,
+      borderRadius: radii.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      paddingHorizontal: 9,
+      paddingVertical: 2,
+    },
+    countText: {
+      color: c.muted,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    empty: {
+      alignItems: "center",
+      paddingTop: 60,
+      paddingBottom: 40,
+    },
+    emptyGlyph: {
+      fontSize: 40,
+      marginBottom: 12,
+    },
+    emptyTitle: {
+      fontSize: 16,
+      fontWeight: "700",
+      color: c.ink,
+    },
+    emptySub: {
+      fontSize: 13,
+      color: c.muted,
+      marginTop: 4,
+    },
+    row: {
+      height: ROW_HEIGHT,
+      justifyContent: "center",
+    },
+    rowPressed: {
+      opacity: 0.6,
+    },
+    ripple: {
+      color: c.lineStrong,
+    },
+    rowInner: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 0,
+    },
+    numCircle: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: c.line,
+      backgroundColor: c.surface,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    numText: {
+      fontSize: 11,
+      fontWeight: "700",
+      color: c.inkSoft,
+    },
+    rowText: {
+      flex: 1,
+      marginLeft: 14,
+    },
+    rowName: {
+      fontSize: 16,
+      fontWeight: "600",
+      color: c.ink,
+      letterSpacing: -0.2,
+    },
+    rowSub: {
+      fontSize: 12.5,
+      color: c.muted,
+      marginTop: 2,
+    },
+    rowArabic: {
+      fontFamily: serif,
+      fontSize: 19,
+      color: c.inkSoft,
+      marginLeft: 10,
+    },
+    downloadBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      backgroundColor: c.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      justifyContent: "center",
+      alignItems: "center",
+      marginLeft: 8,
+    },
+    downloadIcon: {
+      fontSize: 14,
+      color: c.muted,
+    },
+    downloadingBadge: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      backgroundColor: c.accentSoft,
+      justifyContent: "center",
+      alignItems: "center",
+      marginLeft: 8,
+    },
+    accentColor: {
+      color: c.accent,
+    },
+    rowTrack: {
+      position: "absolute",
+      left: 50,
+      right: 0,
+      bottom: 10,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: c.line,
+      overflow: "hidden",
+    },
+    rowFill: {
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: c.accent,
+    },
+    separator: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: c.line,
+      marginLeft: 50,
+    },
+  });
+}

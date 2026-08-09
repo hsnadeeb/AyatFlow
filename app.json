@@ -1,10 +1,23 @@
 {
   "expo": {
-    "name": "Ayah Flow",
-    "slug": "ayah-flow",
+    "name": "Ayat Flow",
+    "slug": "ayat-flow",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A5C52"
+    },
+    "adaptiveIcon": {
+      "foregroundImage": "./assets/adaptive-icon.png",
+      "backgroundColor": "#0A5C52"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
     "android": {
       "package": "com.hasnadeeb.ayahflow",
       "versionCode": 1,
@@ -22,7 +35,7 @@
           "enableBackgroundPlayback": true,
           "enableBackgroundRecording": false,
           "recordAudioAndroid": true,
-          "microphonePermission": "Allow Ayah Flow to read audio levels so the text glows in sync with the recitation."
+          "microphonePermission": "Allow Ayat Flow to read audio levels so the text glows in sync with the recitation."
         }
       ],
       "expo-status-bar",

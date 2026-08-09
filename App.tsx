@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -15,10 +15,9 @@ import {
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
   useAudioPlayer,
-  useAudioPlayerStatus,
 } from "expo-audio";
 import * as Speech from "expo-speech";
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from "expo-file-system/legacy";
 import { getSurah, getSurahs, Ayah, Surah } from "./src/api";
 import {
   getAudioPrefs,
@@ -34,14 +33,27 @@ import {
 import HomeScreen from "./src/components/HomeScreen";
 import FlowScreen from "./src/components/FlowScreen";
 import DownloadManager from "./src/components/DownloadManager";
+import SettingsScreen from "./src/components/SettingsScreen";
+import BookmarksScreen from "./src/components/BookmarksScreen";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
-import { colors } from "./src/theme";
+import { ThemeProvider, useTheme } from "./src/theme";
 
-type Screen = "home" | "flow";
+type Screen = "home" | "flow" | "settings" | "bookmarks";
 
 const GLOW_QUIET = 0.12;
 
 export default function App() {
+  return (
+    <ThemeProvider>
+      <AppInner />
+    </ThemeProvider>
+  );
+}
+
+function AppInner() {
+  const { isDark, palette } = useTheme();
+  const colors = palette;
+
   const [screen, setScreen] = useState<Screen>("home");
   const [surahs, setSurahs] = useState<Surah[]>([]);
   const [loading, setLoading] = useState(true);
@@ -111,7 +123,6 @@ export default function App() {
     updateInterval: 250,
     downloadFirst: false,
   });
-  const audioStatus = useAudioPlayerStatus(player);
 
   useEffect(() => {
     (async () => {
@@ -135,7 +146,7 @@ export default function App() {
         setProgress(savedProgress);
         setAudioPrefs(savedAudioPrefs);
       } catch (error) {
-        Alert.alert("Ayah Flow", "Could not load Quran data. Please check your connection.");
+        Alert.alert("Ayat Flow", "Could not load Quran data. Please check your connection.");
       } finally {
         setLoading(false);
       }
@@ -156,25 +167,30 @@ export default function App() {
       sessionRef.current++;
       cleanupDownloadManager();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Completion detection via player events. This replaces the per-250ms status
+  // subscription, so the app no longer re-renders on every audio status tick.
   useEffect(() => {
-    const justFinished = audioStatus.didJustFinish;
-    const transitioned = justFinished && !lastDidJustFinish.current;
-    lastDidJustFinish.current = justFinished;
-
-    if (!flowData || !playing || !transitioned) return;
-
-    // Only react to a genuine false->true edge of didJustFinish, and only when
-    // the audio for the current stage actually started. This prevents a stale
-    // finish flag (left over from the previous stage's audio) from skipping
-    // the Arabic or English segment that is still loading.
-    if (stage === "arabic") {
-      if (arabicStartedRef.current) startEnglish();
-    } else if (stage === "english") {
-      if (englishStartedRef.current) advance();
-    }
-  }, [audioStatus.didJustFinish, stage, playing, flowData]);
+    const subscription = player.addListener("playbackStatusUpdate", (status) => {
+      const justFinished = status.didJustFinish;
+      if (justFinished && !lastDidJustFinish.current) {
+        lastDidJustFinish.current = true;
+        if (!playingRef.current || screenRef.current !== "flow") return;
+        const s = stageRef.current;
+        if (s === "arabic" && arabicStartedRef.current) {
+          startEnglish();
+        } else if (s === "english" && englishStartedRef.current) {
+          advance();
+        }
+      } else if (!justFinished) {
+        lastDidJustFinish.current = false;
+      }
+    });
+    return () => subscription.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player]);
 
   const handleSample = React.useCallback((sample: { channels: { frames: number[] }[] }) => {
     if (stageRef.current === "idle") return;
@@ -192,14 +208,9 @@ export default function App() {
     player.setAudioSamplingEnabled(true);
     const subscription = player.addListener("audioSampleUpdate", handleSample);
     return () => subscription.remove();
-  }, [player.id, samplingRetry]);
+  }, [player.id, samplingRetry, player, handleSample]);
 
   const currentAyah = flowData?.ayahs[index];
-
-  const progressLabel = useMemo(() => {
-    if (!flowData) return "";
-    return `${index + 1} / ${flowData.ayahs.length}`;
-  }, [flowData, index]);
 
   function stopPulse() {
     if (pulseRef.current) {
@@ -237,32 +248,11 @@ export default function App() {
     }
   }
 
-  function scheduleReadingAdvance(ms: number) {
-    clearReadingTimer();
-    readingTimer.current = setTimeout(() => {
-      if (playingRef.current) advance();
-    }, ms);
-  }
-
   function saveFlowPosition(surah: number, ayahIndex: number) {
     saveLastPosition({ surah, ayahIndex });
     setLast({ surah, ayahIndex });
     saveSurahProgress(surah, ayahIndex);
     setProgress((prev) => ({ ...prev, [surah]: ayahIndex }));
-  }
-
-  function toggleAudio(stage: "arabic" | "english") {
-    const prev = audioPrefsRef.current;
-    const next: AudioPrefs =
-      stage === "arabic" ? { ...prev, arabic: !prev.arabic } : { ...prev, english: !prev.english };
-    audioPrefsRef.current = next;
-    setAudioPrefs(next);
-    saveAudioPrefs(next);
-
-    if (playingRef.current && stageRef.current === stage) {
-      if (stage === "arabic") startArabic();
-      else startEnglish();
-    }
   }
 
   function animateGlow(target: number, duration: number) {
@@ -294,36 +284,9 @@ export default function App() {
     } catch (error) {}
   }
 
-  async function openSurah(number: number, resumeIndex = 0) {
-    if (loading) return;
-    setLoading(true);
-    try {
-      const data = await getSurah(number);
-      setFlowData(data);
-      setIndex(Math.min(resumeIndex, data.ayahs.length - 1));
-      setStage("idle");
-      setPlaying(false);
-      advancingRef.current = false;
-      stopPulse();
-      glow.setValue(0);
-      clearReadingTimer();
-      sessionRef.current++;
-      clearStageState();
-      setDownloadManagerSurah(data.surah);
-      setScreen("flow");
-
-      // Start background downloading for this surah
-      startBackgroundDownload(data.surah.number, data.ayahs);
-    } catch {
-      Alert.alert("Ayah Flow", "Could not load this Surah. Please check your connection.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function startBackgroundDownload(surahNumber: number, ayahs: Ayah[]) {
     const downloadManager = getDownloadManager();
-    
+
     // Check if surah is already downloaded
     const progress = await downloadManager.getSurahDownloadProgress(surahNumber, ayahs.length);
     if (progress >= 1) {
@@ -332,40 +295,20 @@ export default function App() {
 
     // Start background download without blocking UI
     setDownloading(true);
-    setDownloadingSurahs(prev => new Set(prev).add(surahNumber));
-    
+    setDownloadingSurahs((prev) => new Set(prev).add(surahNumber));
+
     try {
       await downloadManager.downloadSurahAudio(surahNumber, ayahs);
     } catch (error) {
-      console.error(`Background download failed for Surah ${surahNumber}:`, error);
       // Don't show error to user since this is background
     } finally {
       setDownloading(false);
-      setDownloadingSurahs(prev => {
+      setDownloadingSurahs((prev) => {
         const next = new Set(prev);
         next.delete(surahNumber);
         return next;
       });
     }
-  }
-
-  function openDownloadManager(surahNumber: number) {
-    const surah = surahs.find(s => s.number === surahNumber);
-    if (surah) {
-      setDownloadManagerSurah(surah);
-      setDownloadManagerVisible(true);
-    }
-  }
-
-  function openFlowDownloadManager() {
-    if (flowData) {
-      setDownloadManagerSurah(flowData.surah);
-      setDownloadManagerVisible(true);
-    }
-  }
-
-  function closeDownloadManager() {
-    setDownloadManagerVisible(false);
   }
 
   function stopAll() {
@@ -456,7 +399,7 @@ export default function App() {
       // Wait until the player has actually loaded the Arabic source before
       // marking the stage as started. Without this, the stale didJustFinish
       // flag from the previous English segment could skip the Arabic.
-      const loaded = await waitForCondition(() => player.isLoaded, 4000);
+      const loaded = await waitForCondition(() => player.isLoaded || player.playing, 10000);
       if (session !== sessionRef.current) return;
       if (!loaded) throw new Error("Arabic audio did not load");
 
@@ -527,7 +470,7 @@ export default function App() {
         player.setPlaybackRate(speedRef.current);
         player.play();
 
-        const loaded = await waitForCondition(() => player.isLoaded, 4000);
+        const loaded = await waitForCondition(() => player.isLoaded || player.playing, 10000);
         if (session !== sessionRef.current) return;
         if (!loaded) throw new Error("English audio did not load");
 
@@ -666,8 +609,10 @@ export default function App() {
   }
 
   async function bookmarkCurrent() {
-    if (!flowData || !currentAyah) return;
-    const key = `${flowData.surah.number}:${currentAyah.numberInSurah}`;
+    const data = flowRef.current;
+    const ayah = data?.ayahs[indexRef.current];
+    if (!data || !ayah) return;
+    const key = `${data.surah.number}:${ayah.numberInSurah}`;
     const next = await toggleBookmark(key);
     setBookmarks(next);
   }
@@ -679,19 +624,153 @@ export default function App() {
     }
   }
 
-  function backHome() {
+  async function openSurah(number: number, resumeIndex = 0) {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const data = await getSurah(number);
+      setFlowData(data);
+      setIndex(Math.min(resumeIndex, data.ayahs.length - 1));
+      setStage("idle");
+      setPlaying(false);
+      advancingRef.current = false;
+      stopPulse();
+      glow.setValue(0);
+      clearReadingTimer();
+      sessionRef.current++;
+      clearStageState();
+      setDownloadManagerSurah(data.surah);
+      setScreen("flow");
+
+      // Start background downloading for this surah
+      startBackgroundDownload(data.surah.number, data.ayahs);
+    } catch {
+      Alert.alert("Ayat Flow", "Could not load this Surah. Please check your connection.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openDownloadManager(surahNumber: number) {
+    const surah = surahs.find((s) => s.number === surahNumber);
+    if (surah) {
+      setDownloadManagerSurah(surah);
+      setDownloadManagerVisible(true);
+    }
+  }
+
+  function openFlowDownloadManager() {
+    const data = flowRef.current;
+    if (data) {
+      setDownloadManagerSurah(data.surah);
+      setDownloadManagerVisible(true);
+    }
+  }
+
+  function closeDownloadManager() {
+    setDownloadManagerVisible(false);
+  }
+
+  function toggleAudio(stage: "arabic" | "english") {
+    const prev = audioPrefsRef.current;
+    const next: AudioPrefs =
+      stage === "arabic" ? { ...prev, arabic: !prev.arabic } : { ...prev, english: !prev.english };
+    audioPrefsRef.current = next;
+    setAudioPrefs(next);
+    saveAudioPrefs(next);
+
+    if (playingRef.current && stageRef.current === stage) {
+      if (stage === "arabic") startArabic();
+      else startEnglish();
+    }
+  }
+
+  // ---- Memoized handlers for child components ----
+
+  const onBack = useCallback(() => {
     stopAll();
     setScreen("home");
-  }
+  }, []);
+
+  const onOpenSettings = useCallback(() => {
+    stopAll();
+    setScreen("settings");
+  }, []);
+
+  const onOpenBookmarks = useCallback(() => {
+    stopAll();
+    setScreen("bookmarks");
+  }, []);
+
+  const onCloseSubScreen = useCallback(() => {
+    setScreen("home");
+  }, []);
+
+  const onTogglePlay = useCallback(() => {
+    if (playingRef.current) stopAll();
+    else startFlow();
+  }, []);
+
+  const onPrevious = useCallback(() => {
+    previous();
+  }, []);
+
+  const onNext = useCallback(() => {
+    skip();
+  }, []);
+
+  const onRepeat = useCallback(() => {
+    repeat();
+  }, []);
+
+  const onSpeed = useCallback((next: number) => {
+    changeSpeed(next);
+  }, []);
+
+  const onBookmark = useCallback(() => {
+    bookmarkCurrent();
+  }, []);
+
+  const onToggleAudio = useCallback((s: "arabic" | "english") => {
+    toggleAudio(s);
+  }, []);
+
+  const onOpenDownloadManagerFromHome = useCallback(
+    (surahNumber: number) => {
+      openDownloadManager(surahNumber);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [surahs]
+  );
+
+  const onOpenFlowDownloadManager = useCallback(() => {
+    openFlowDownloadManager();
+  }, []);
+
+  const onCloseDownloadManager = useCallback(() => {
+    closeDownloadManager();
+  }, []);
+
+  const onDownloadComplete = useCallback(() => {
+    // Audio data is read from the download manager on demand; nothing to refresh.
+  }, []);
+
+  const openSurahHandler = useCallback(
+    (number: number, resumeIndex?: number) => {
+      openSurah(number, resumeIndex ?? 0);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loading]
+  );
 
   if (loading && surahs.length === 0) {
     return (
       <SafeAreaProvider>
-        <SafeAreaView style={styles.container}>
-          <StatusBar style="dark" />
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
+          <StatusBar style={isDark ? "light" : "dark"} />
           <View style={styles.center}>
             <ActivityIndicator size="large" color={colors.accent} />
-            <Text style={styles.muted}>Loading the Qur'an…</Text>
+            <Text style={[styles.muted, { color: colors.muted }]}>Loading the Qur'an…</Text>
           </View>
         </SafeAreaView>
       </SafeAreaProvider>
@@ -701,24 +780,66 @@ export default function App() {
   if (screen === "home") {
     return (
       <SafeAreaProvider>
-        <SafeAreaView style={styles.container}>
-          <StatusBar style="dark" />
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
+          <StatusBar style={isDark ? "light" : "dark"} />
           <HomeScreen
             surahs={surahs}
             last={last}
             progress={progress}
             downloadingSurahs={downloadingSurahs}
-            onOpenSurah={openSurah}
-            onOpenDownloadManager={openDownloadManager}
+            bookmarksCount={bookmarks.length}
+            onOpenSurah={openSurahHandler}
+            onOpenDownloadManager={onOpenDownloadManagerFromHome}
+            onOpenSettings={onOpenSettings}
+            onOpenBookmarks={onOpenBookmarks}
           />
           {loading && (
             <View style={styles.loadingOverlay}>
-              <View style={styles.loadingCard}>
+              <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
                 <ActivityIndicator size="small" color={colors.accent} />
-                <Text style={styles.loadingText}>Opening Surah…</Text>
+                <Text style={[styles.loadingText, { color: colors.inkSoft }]}>
+                  Opening Surah…
+                </Text>
               </View>
             </View>
           )}
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (screen === "settings") {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView
+          style={[styles.container, { backgroundColor: colors.bg }]}
+          edges={["bottom"]}
+        >
+          <StatusBar style={isDark ? "light" : "dark"} />
+          <SettingsScreen
+            audioPrefs={audioPrefs}
+            onToggleAudio={onToggleAudio}
+            onClose={onCloseSubScreen}
+          />
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (screen === "bookmarks") {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView
+          style={[styles.container, { backgroundColor: colors.bg }]}
+          edges={["bottom"]}
+        >
+          <StatusBar style={isDark ? "light" : "dark"} />
+          <BookmarksScreen
+            bookmarks={bookmarks}
+            surahs={surahs}
+            onOpenSurah={openSurahHandler}
+            onClose={onCloseSubScreen}
+          />
         </SafeAreaView>
       </SafeAreaProvider>
     );
@@ -728,39 +849,40 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.container}>
-        <StatusBar style="dark" />
+      <SafeAreaView
+        style={[styles.container, { backgroundColor: colors.bg }]}
+        edges={["bottom"]}
+      >
+        <StatusBar style={isDark ? "light" : "dark"} />
         <FlowScreen
           surah={flowData.surah}
           ayahs={flowData.ayahs}
           index={index}
           stage={stage}
           playing={playing}
-        speed={speed}
-        bookmarks={bookmarks}
-        audioPrefs={audioPrefs}
-        glow={glow}
-        downloading={downloading}
-        onBack={backHome}
-        onTogglePlay={playing ? stopAll : startFlow}
-        onPrevious={previous}
-        onNext={skip}
-        onRepeat={repeat}
-        onSpeed={changeSpeed}
-        onBookmark={bookmarkCurrent}
-        onToggleAudio={toggleAudio}
-        onOpenDownloadManager={openFlowDownloadManager}
-      />
-      <DownloadManager
-        visible={downloadManagerVisible}
-        surah={downloadManagerSurah}
-        ayahs={flowData?.ayahs || []}
-        onClose={closeDownloadManager}
-        onDownloadComplete={() => {
-          // Refresh audio data after download
-        }}
-      />
-    </SafeAreaView>
+          speed={speed}
+          bookmarks={bookmarks}
+          audioPrefs={audioPrefs}
+          glow={glow}
+          downloading={downloading}
+          onBack={onBack}
+          onTogglePlay={onTogglePlay}
+          onPrevious={onPrevious}
+          onNext={onNext}
+          onRepeat={onRepeat}
+          onSpeed={onSpeed}
+          onBookmark={onBookmark}
+          onToggleAudio={onToggleAudio}
+          onOpenDownloadManager={onOpenFlowDownloadManager}
+        />
+        <DownloadManager
+          visible={downloadManagerVisible}
+          surah={downloadManagerSurah}
+          ayahs={flowData?.ayahs || []}
+          onClose={onCloseDownloadManager}
+          onDownloadComplete={onDownloadComplete}
+        />
+      </SafeAreaView>
     </SafeAreaProvider>
   );
 }
@@ -768,7 +890,6 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bg,
   },
   center: {
     flex: 1,
@@ -777,7 +898,6 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   muted: {
-    color: colors.muted,
     fontSize: 13,
   },
   loadingOverlay: {
@@ -786,26 +906,24 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "rgba(247, 246, 242, 0.72)",
+    backgroundColor: "rgba(0, 0, 0, 0.28)",
     justifyContent: "center",
     alignItems: "center",
   },
   loadingCard: {
-    backgroundColor: colors.surface,
     borderRadius: 16,
     paddingHorizontal: 22,
     paddingVertical: 15,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    shadowColor: "#1C1C1E",
-    shadowOpacity: 0.08,
+    shadowColor: "#000000",
+    shadowOpacity: 0.12,
     shadowRadius: 14,
     shadowOffset: { width: 0, height: 6 },
     elevation: 4,
   },
   loadingText: {
-    color: colors.inkSoft,
     fontSize: 14,
     fontWeight: "600",
   },
