@@ -111,7 +111,7 @@ const FlowScreen = React.memo(function FlowScreen({
               {surah.englishName}
             </Text>
             <Text style={styles.progressLabel}>
-              Ayah {index + 1} of {ayahs.length}
+              Ayat {index + 1} of {ayahs.length}
             </Text>
           </View>
           <View style={styles.headerRight}>
@@ -124,7 +124,7 @@ const FlowScreen = React.memo(function FlowScreen({
               style={styles.iconBtn}
               onPress={onBookmark}
               hitSlop={6}
-              accessibilityLabel={isBookmarked ? "Remove bookmark" : "Bookmark ayah"}
+              accessibilityLabel={isBookmarked ? "Remove bookmark" : "Bookmark ayat"}
             >
               <Text style={[styles.star, isBookmarked && styles.starActive]}>
                 {isBookmarked ? "★" : "☆"}
@@ -143,8 +143,8 @@ const FlowScreen = React.memo(function FlowScreen({
       >
         <View style={[styles.card, stage !== "idle" && styles.cardActive]}>
           <View style={styles.cardTop}>
-            <View style={styles.ayahPill}>
-              <Text style={styles.ayahPillText}>Ayah {currentAyah.numberInSurah}</Text>
+            <View style={styles.ayatPill}>
+              <Text style={styles.ayatPillText}>Ayat {currentAyah.numberInSurah}</Text>
             </View>
             <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
               <Animated.View
@@ -216,7 +216,7 @@ const FlowScreen = React.memo(function FlowScreen({
         </View>
 
         <View style={styles.controls}>
-          <Pressable style={styles.secondaryBtn} onPress={onPrevious} hitSlop={6} accessibilityLabel="Previous ayah">
+          <Pressable style={styles.secondaryBtn} onPress={onPrevious} hitSlop={6} accessibilityLabel="Previous ayat">
             <Text style={styles.secondaryGlyph}>‹</Text>
           </Pressable>
 
@@ -239,7 +239,7 @@ const FlowScreen = React.memo(function FlowScreen({
         </Pressable>
 
         <Pressable style={styles.repeatBtn} onPress={onRepeat} hitSlop={8}>
-          <Text style={styles.repeatText}>↻ Repeat ayah</Text>
+          <Text style={styles.repeatText}>↻ Repeat Ayat</Text>
         </Pressable>
 
         <Text style={styles.sourceNote}>
@@ -354,13 +354,13 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignItems: "center",
       marginBottom: 20,
     },
-    ayahPill: {
+    ayatPill: {
       backgroundColor: c.well,
       borderRadius: radii.pill,
       paddingHorizontal: 12,
       paddingVertical: 5,
     },
-    ayahPillText: {
+    ayatPillText: {
       fontSize: 11,
       fontWeight: "700",
       color: c.inkSoft,

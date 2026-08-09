@@ -8,7 +8,7 @@ import { saveLastPositionForWidget } from './widgetManager';
 interface QuickAyahWidgetProps {
   surahName?: string;
   ayahNumber?: number;
-  totalAyahs?: number;
+  totalAyats?: number;
   progress?: DimensionValue;
   onPress?: () => void;
 }
@@ -16,7 +16,7 @@ interface QuickAyahWidgetProps {
 export default function QuickAyahWidget({ 
   surahName, 
   ayahNumber, 
-  totalAyahs, 
+  totalAyats, 
   progress, 
   onPress 
 }: QuickAyahWidgetProps) {
@@ -72,7 +72,7 @@ export default function QuickAyahWidget({
   };
 
   const displaySurahName = surahName || ayahData ? 'Continue Listening' : 'Loading...';
-  const displayAyahNumber = ayahNumber ? `Ayah ${ayahNumber}` : 'Ayah 1';
+  const displayAyahNumber = ayahNumber ? `Ayat ${ayahNumber}` : 'Ayat 1';
   const displayProgress = progress || '0%';
 
   const styles = StyleSheet.create({
@@ -218,9 +218,9 @@ export default function QuickAyahWidget({
             <View style={styles.progressBar}>
               <View style={[styles.progressFill, { width: displayProgress }]} />
             </View>
-            {totalAyahs && ayahNumber && (
+            {totalAyats && ayahNumber && (
               <Text style={styles.progressText}>
-                {ayahNumber} of {totalAyahs} ayahs
+                {ayahNumber} of {totalAyats} ayats
               </Text>
             )}
           </View>

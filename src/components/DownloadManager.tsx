@@ -184,7 +184,7 @@ export default function DownloadManager({
           <View style={styles.surahInfo}>
             <Text style={styles.surahName}>{surah.englishName}</Text>
             <Text style={styles.surahMeta}>
-              {surah.englishNameTranslation} · {ayahs.length} ayahs · Arabic + English
+              {surah.englishNameTranslation} · {ayahs.length} ayats · Arabic + English
             </Text>
           </View>
 
@@ -195,7 +195,7 @@ export default function DownloadManager({
                   {allDone ? "All audio downloaded" : downloadedCount > 0 ? "Partially downloaded" : "Not downloaded"}
                 </Text>
                 <Text style={styles.progressDetail}>
-                  {downloadedCount} of {ayahs.length} ayahs on device
+                  {downloadedCount} of {ayahs.length} ayats on device
                 </Text>
               </View>
               <Text style={[styles.progressPercent, allDone && styles.progressPercentDone]}>

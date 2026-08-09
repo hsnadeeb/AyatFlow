@@ -100,7 +100,7 @@ export default function BookmarksScreen({ bookmarks, surahs, onOpenSurah, onClos
             <Text style={styles.rowTitle} numberOfLines={1}>
               {item.surahName}
             </Text>
-            <Text style={styles.rowAyah}>Ayah {item.ayahNumberInSurah}</Text>
+            <Text style={styles.rowAyat}>Ayat {item.ayahNumberInSurah}</Text>
           </View>
           <Text style={styles.rowArrow}>›</Text>
         </View>
@@ -121,8 +121,8 @@ export default function BookmarksScreen({ bookmarks, surahs, onOpenSurah, onClos
         {entries === null
           ? ""
           : entries.length === 1
-            ? "1 bookmarked ayah"
-            : `${entries.length} bookmarked ayahs`}
+            ? "1 bookmarked ayat"
+            : `${entries.length} bookmarked ayats`}
       </Text>
     ),
     [entries, styles]
@@ -156,7 +156,7 @@ export default function BookmarksScreen({ bookmarks, surahs, onOpenSurah, onClos
               <Text style={styles.emptyGlyph}>☆</Text>
               <Text style={styles.emptyTitle}>No bookmarks yet</Text>
               <Text style={styles.emptySub}>
-                Tap the star on any ayah while listening to save it here.
+                Tap the star on any ayat while listening to save it here.
               </Text>
             </View>
           }
@@ -257,7 +257,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.ink,
       flexShrink: 1,
     },
-    rowAyah: {
+    rowAyat: {
       fontSize: 12,
       fontWeight: "600",
       color: c.accent,

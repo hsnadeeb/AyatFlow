@@ -8,7 +8,8 @@
     "android": "expo run:android",
     "prebuild": "expo prebuild",
     "doctor": "expo doctor",
-    "build:android": "eas build --platform android --profile preview"
+    "build:android": "eas build --platform android --profile preview",
+    "build:apk": "./build-apk.sh"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.2.0",

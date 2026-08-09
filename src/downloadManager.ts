@@ -294,10 +294,10 @@ class DownloadManager {
     return this.statusCache[key]?.progress ?? 0;
   }
 
-  async getSurahDownloadProgress(surahNumber: number, totalAyahs: number): Promise<number> {
+  async getSurahDownloadProgress(surahNumber: number, totalAyats: number): Promise<number> {
     let downloadedCount = 0;
     
-    for (let i = 1; i <= totalAyahs; i++) {
+    for (let i = 1; i <= totalAyats; i++) {
       const arabicDownloaded = await this.isDownloaded(surahNumber, i, 'arabic');
       const englishDownloaded = await this.isDownloaded(surahNumber, i, 'english');
       
@@ -306,7 +306,7 @@ class DownloadManager {
       }
     }
     
-    return downloadedCount / totalAyahs;
+    return downloadedCount / totalAyats;
   }
 
   async deleteAudio(surahNumber: number, ayahNumber: number, type: 'arabic' | 'english'): Promise<void> {
@@ -325,8 +325,8 @@ class DownloadManager {
     this.debouncedSave();
   }
 
-  async deleteSurahAudio(surahNumber: number, totalAyahs: number): Promise<void> {
-    for (let i = 1; i <= totalAyahs; i++) {
+  async deleteSurahAudio(surahNumber: number, totalAyats: number): Promise<void> {
+    for (let i = 1; i <= totalAyats; i++) {
       await this.deleteAudio(surahNumber, i, 'arabic');
       await this.deleteAudio(surahNumber, i, 'english');
     }
@@ -376,7 +376,7 @@ class DownloadManager {
 
       await Sharing.shareAsync(filePath, {
         mimeType: 'audio/mpeg',
-        dialogTitle: `Share Ayah ${ayahNumber} ${type} audio`,
+        dialogTitle: `Share Ayat ${ayahNumber} ${type} audio`,
       });
     } catch (error) {
       console.error('Failed to share audio file:', error);
@@ -384,10 +384,10 @@ class DownloadManager {
     }
   }
 
-  async shareSurahAudio(surahNumber: number, totalAyahs: number): Promise<void> {
+  async shareSurahAudio(surahNumber: number, totalAyats: number): Promise<void> {
     // For now, share the first available audio file as a sample
     // In a full implementation, you might want to create a zip file
-    for (let i = 1; i <= totalAyahs; i++) {
+    for (let i = 1; i <= totalAyats; i++) {
       const arabicPath = await this.getLocalAudioPath(surahNumber, i, 'arabic');
       if (arabicPath) {
         await this.shareAudioFile(surahNumber, i, 'arabic');

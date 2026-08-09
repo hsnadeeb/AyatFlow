@@ -181,7 +181,7 @@ export default function HomeScreen({
         <QuickAyahWidget 
           surahName={resumeSurah?.englishName ?? `Surah ${last.surah}`}
           ayahNumber={last.ayahIndex + 1}
-          totalAyahs={resumeTotal}
+          totalAyats={resumeTotal}
           progress={resumePct}
           onPress={() => onOpenSurah(last.surah, last.ayahIndex)}
         />
