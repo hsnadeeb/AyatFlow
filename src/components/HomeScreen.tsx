@@ -164,7 +164,7 @@ export default function HomeScreen({
           style={styles.searchInput}
           value={query}
           onChangeText={setQuery}
-          placeholder="Search surahs, meanings…"
+          placeholder="Search surahs"
           placeholderTextColor={c.muted}
           autoCorrect={false}
           autoCapitalize="none"

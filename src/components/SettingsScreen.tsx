@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Text,
   View,
+  Image
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AudioPrefs } from "../storage";
@@ -98,7 +99,7 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
             <Text style={styles.backGlyph}>‹</Text>
           </Pressable>
           <Text style={styles.title}>Settings</Text>
-          <View style={styles.iconBtn} />
+          <View/>
         </View>
       </View>
 
@@ -159,12 +160,17 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
         <Text style={styles.sectionLabel}>ABOUT</Text>
         <View style={styles.card}>
           <View style={styles.aboutRow}>
+            {/* use the icon.png from assets for below */}
             <View style={styles.aboutMark}>
-              <Text style={styles.aboutMarkText}>AF</Text>
+              <Image
+                source={require('../../assets/icon.png')}
+                style={styles.aboutMarkImage}
+                resizeMode="contain"
+              />
             </View>
             <View style={styles.aboutText}>
               <Text style={styles.aboutName}>Ayat Flow</Text>
-              <Text style={styles.aboutSub}>Version 0.1.0 · Learn the Qur'an, one ayah at a time</Text>
+              <Text style={styles.aboutSub}>Version 0.1.0 · Learn the Qur'an, one ayat at a time</Text>
             </View>
           </View>
           <View style={styles.cardDivider} />
@@ -172,8 +178,7 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
             Uthmani script · Mishary Alafasy recitation{`\n`}Saheeh International · English: Ibrahim Walk
           </Text>
         </View>
-
-        <Text style={styles.footer}>Made with care. May your recitation flow.</Text>
+        <Text style={styles.footer}>May your recitation flow.{'\n'} Developed by Hasan Adeeb, in India </Text>
       </ScrollView>
     </View>
   );
@@ -297,6 +302,10 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     },
     segmentTextActive: {
       color: c.ink,
+    },
+    aboutMarkImage: {
+      width: 48,
+      height: 48,
     },
     toggleTrack: {
       width: 44,
