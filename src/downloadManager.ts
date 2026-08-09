@@ -88,6 +88,87 @@ class DownloadManager {
     
     // Sync with actual files on disk (for app reinstalls)
     await this.syncWithDiskFiles();
+    await this.syncWithSharedStorage();
+  }
+
+  /**
+   * Restore previously downloaded audio from shared storage after a fresh
+   * install: any file found in Download/AyatFlow/quran-audio that is missing
+   * from the app's working directory is copied back and marked as downloaded.
+   */
+  private async syncWithSharedStorage(): Promise<void> {
+    if (!sharedStorage) return;
+    if (!(await ensureSharedStoragePermission())) return;
+    try {
+      const files: string[] = await sharedStorage.listAudioFiles();
+      for (const rel of files) {
+        const match = rel.match(/^quran-audio\/Surah(\d+)\/(arabic|english)\/(\d+)\.mp3$/);
+        if (!match) continue;
+        const surahNumber = parseInt(match[1], 10);
+        const type = match[2] as 'arabic' | 'english';
+        const ayahNumber = parseInt(match[3], 10);
+        const key = this.getAudioKey(surahNumber, ayahNumber, type);
+        if (this.statusCache[key]?.downloaded) continue;
+
+        const destPath = `${this.audioDir}${this.getFileName(surahNumber, ayahNumber, type)}`;
+        const restored = await sharedStorage.restoreAudioFile(
+          `quran-audio/Surah${surahNumber}/${type}`,
+          `${ayahNumber}.mp3`,
+          destPath
+        );
+        if (restored) {
+          this.statusCache[key] = {
+            downloaded: true,
+            progress: 1,
+            filePath: destPath,
+            lastUpdated: Date.now()
+          };
+        }
+      }
+      this.debouncedSave();
+    } catch (error) {
+      console.error('Failed to sync audio with shared storage:', error);
+    }
+  }
+
+  /**
+   * Mirror a freshly downloaded file into shared storage so it survives
+   * app reinstall. Fire-and-forget: playback never depends on this copy.
+   */
+  private async mirrorAudioToSharedStorage(
+    surahNumber: number,
+    ayahNumber: number,
+    type: 'arabic' | 'english',
+    sourcePath: string
+  ): Promise<void> {
+    if (!sharedStorage) return;
+    if (!(await ensureSharedStoragePermission())) return;
+    try {
+      await sharedStorage.saveAudioFile(
+        `quran-audio/Surah${surahNumber}/${type}`,
+        `${ayahNumber}.mp3`,
+        sourcePath
+      );
+    } catch (error) {
+      console.warn('Failed to mirror audio to shared storage:', error);
+    }
+  }
+
+  private async deleteFromSharedStorage(
+    surahNumber: number,
+    ayahNumber: number,
+    type: 'arabic' | 'english'
+  ): Promise<void> {
+    if (!sharedStorage) return;
+    if (!(await ensureSharedStoragePermission())) return;
+    try {
+      await sharedStorage.deleteAudioFile(
+        `quran-audio/Surah${surahNumber}/${type}`,
+        `${ayahNumber}.mp3`
+      );
+    } catch (error) {
+      console.warn('Failed to delete audio from shared storage:', error);
+    }
   }
   
   private async syncWithDiskFiles(): Promise<void> {
@@ -354,7 +435,10 @@ class DownloadManager {
           lastUpdated: Date.now()
         };
         this.debouncedSave();
-        
+
+        // Mirror into shared storage so the download survives reinstalls
+        this.mirrorAudioToSharedStorage(surahNumber, ayahNumber, type, result.uri);
+
         return result.uri;
       } else {
         throw new Error('Download failed');
@@ -411,9 +495,8 @@ class DownloadManager {
 
   getStorageLocation(): string {
     if (Platform.OS === 'android') {
-      // Return the user-facing path for Android
-      // documentDirectory maps to the app's internal storage directory
-      return `${FileSystem.documentDirectory}AyatFlow/quran-audio/`;
+      // Where the persistent copies live (shared storage, survives reinstall)
+      return `/storage/emulated/0/Download/AyatFlow/quran-audio/`;
     } else {
       // For iOS, return the app documents directory path
       return this.audioDir;
@@ -446,7 +529,9 @@ class DownloadManager {
         console.error('Failed to delete audio file:', error);
       }
     }
-    
+
+    this.deleteFromSharedStorage(surahNumber, ayahNumber, type);
+
     delete this.statusCache[key];
     this.debouncedSave();
   }

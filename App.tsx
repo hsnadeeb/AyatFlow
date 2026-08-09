@@ -85,6 +85,7 @@ function AppInner() {
   const playingRef = useRef(playing);
   const stageRef = useRef(stage);
   const flowRef = useRef(flowData);
+  const indexRef = useRef(index);
 
   useEffect(() => {
     playingRef.current = playing;
@@ -97,6 +98,10 @@ function AppInner() {
   useEffect(() => {
     flowRef.current = flowData;
   }, [flowData]);
+
+  useEffect(() => {
+    indexRef.current = index;
+  }, [index]);
 
   // Mirror controller state into local UI state
   useEffect(() => {
@@ -236,7 +241,7 @@ function AppInner() {
 
   async function bookmarkCurrent() {
     const data = flowRef.current;
-    const ayah = data?.ayahs[index];
+    const ayah = data?.ayahs[indexRef.current];
     if (!data || !ayah) return;
     const key = `${data.surah.number}:${ayah.numberInSurah}`;
     const next = await toggleAyahBookmark(key);

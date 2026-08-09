@@ -40,65 +40,182 @@ export type Palette = {
   shadowOpacity: number;
 };
 
+// const lightPalette: Palette = {
+//   bg: "#F6F5F1",
+//   surface: "#FFFFFF",
+//   well: "#EFEEE8",
+//   ink: "#1C1C1E",
+//   inkSoft: "#5B5B63",
+//   muted: "#9A9AA1",
+//   line: "#E8E6DF",
+//   lineStrong: "#D8D6CD",
+//   accent: "#0F766E",
+//   accentStrong: "#0B5F59",
+//   accentSoft: "#E3F1EE",
+//   accentBorder: "rgba(15, 118, 110, 0.32)",
+//   accentGlow: "rgba(15, 118, 110, 0.38)",
+//   accent2: "#4F46E5",
+//   accent2Soft: "#ECEAFB",
+//   accent2Border: "rgba(79, 70, 229, 0.30)",
+//   accent2Glow: "rgba(79, 70, 229, 0.34)",
+//   error: "#D64545",
+//   success: "#1E9E62",
+//   warning: "#C78A1D",
+//   hero: "#0D5A53",
+//   heroInk: "#EAF6F3",
+//   heroSub: "#A9CBC4",
+//   onAccent: "#FFFFFF",
+//   overlay: "rgba(28, 28, 30, 0.35)",
+//   shadow: "#1C1C1E",
+//   shadowOpacity: 0.07,
+// } as const;
+
+// const darkPalette: Palette = {
+//   bg: "#0F1113",
+//   surface: "#191C1F",
+//   well: "#22262A",
+//   ink: "#F0EFEA",
+//   inkSoft: "#A8A8B0",
+//   muted: "#71717A",
+//   line: "#262A2E",
+//   lineStrong: "#34393E",
+//   accent: "#2BB5A5",
+//   accentStrong: "#3CC4B4",
+//   accentSoft: "#133834",
+//   accentBorder: "rgba(43, 181, 165, 0.42)",
+//   accentGlow: "rgba(43, 181, 165, 0.45)",
+//   accent2: "#8A94F8",
+//   accent2Soft: "#262B4C",
+//   accent2Border: "rgba(138, 148, 248, 0.42)",
+//   accent2Glow: "rgba(138, 148, 248, 0.45)",
+//   error: "#FF6B6B",
+//   success: "#3DD68C",
+//   warning: "#E8B04B",
+//   hero: "#0F3D38",
+//   heroInk: "#D9F3EC",
+//   heroSub: "#7FB8AC",
+//   onAccent: "#062E2A",
+//   overlay: "rgba(0, 0, 0, 0.55)",
+//   shadow: "#000000",
+//   shadowOpacity: 0.45,
+// };
+
 const lightPalette: Palette = {
-  bg: "#F6F5F1",
-  surface: "#FFFFFF",
-  well: "#EFEEE8",
-  ink: "#1C1C1E",
-  inkSoft: "#5B5B63",
-  muted: "#9A9AA1",
-  line: "#E8E6DF",
-  lineStrong: "#D8D6CD",
-  accent: "#0F766E",
-  accentStrong: "#0B5F59",
-  accentSoft: "#E3F1EE",
-  accentBorder: "rgba(15, 118, 110, 0.32)",
-  accentGlow: "rgba(15, 118, 110, 0.38)",
-  accent2: "#4F46E5",
-  accent2Soft: "#ECEAFB",
-  accent2Border: "rgba(79, 70, 229, 0.30)",
-  accent2Glow: "rgba(79, 70, 229, 0.34)",
-  error: "#D64545",
-  success: "#1E9E62",
-  warning: "#C78A1D",
-  hero: "#0D5A53",
-  heroInk: "#EAF6F3",
-  heroSub: "#A9CBC4",
+  // ─────────────────────────────────────
+  // FOUNDATION
+  // ─────────────────────────────────────
+  bg: "#F5F1E8",          // Warm ivory / parchment
+  surface: "#FFFCF5",      // Soft ivory
+  well: "#EDE7D9",         // Subtle parchment well
+
+  // ─────────────────────────────────────
+  // TEXT
+  // ─────────────────────────────────────
+  ink: "#1B211D",          // Deep green-black
+  inkSoft: "#59605A",      // Muted forest gray
+  muted: "#8D918B",        // Soft neutral
+  line: "#E3DDD0",         // Warm divider
+  lineStrong: "#CEC6B6",   // Strong divider
+
+  // ─────────────────────────────────────
+  // PRIMARY — EMERALD
+  // ─────────────────────────────────────
+  accent: "#176B5B",
+  accentStrong: "#0F5548",
+  accentSoft: "#E1EEE9",
+  accentBorder: "rgba(23, 107, 91, 0.28)",
+  accentGlow: "rgba(23, 107, 91, 0.24)",
+
+  // ─────────────────────────────────────
+  // SECONDARY — CHAMPAGNE GOLD
+  // ─────────────────────────────────────
+  accent2: "#B18A45",
+  accent2Soft: "#F3EBDD",
+  accent2Border: "rgba(177, 138, 69, 0.30)",
+  accent2Glow: "rgba(177, 138, 69, 0.24)",
+
+  // ─────────────────────────────────────
+  // STATUS
+  // ─────────────────────────────────────
+  error: "#B94A48",
+  success: "#2E7D5B",
+  warning: "#B8863B",
+
+  // ─────────────────────────────────────
+  // HERO
+  // ─────────────────────────────────────
+  hero: "#103F36",
+  heroInk: "#F2F4E9",
+  heroSub: "#A9C5BB",
+
   onAccent: "#FFFFFF",
-  overlay: "rgba(28, 28, 30, 0.35)",
-  shadow: "#1C1C1E",
-  shadowOpacity: 0.07,
+
+  // ─────────────────────────────────────
+  // OVERLAY / SHADOW
+  // ─────────────────────────────────────
+  overlay: "rgba(27, 33, 29, 0.38)",
+  shadow: "#1B211D",
+  shadowOpacity: 0.09,
 } as const;
 
+
 const darkPalette: Palette = {
-  bg: "#0F1113",
-  surface: "#191C1F",
-  well: "#22262A",
-  ink: "#F0EFEA",
-  inkSoft: "#A8A8B0",
-  muted: "#71717A",
-  line: "#262A2E",
-  lineStrong: "#34393E",
-  accent: "#2BB5A5",
-  accentStrong: "#3CC4B4",
-  accentSoft: "#133834",
-  accentBorder: "rgba(43, 181, 165, 0.42)",
-  accentGlow: "rgba(43, 181, 165, 0.45)",
-  accent2: "#8A94F8",
-  accent2Soft: "#262B4C",
-  accent2Border: "rgba(138, 148, 248, 0.42)",
-  accent2Glow: "rgba(138, 148, 248, 0.45)",
-  error: "#FF6B6B",
-  success: "#3DD68C",
-  warning: "#E8B04B",
-  hero: "#0F3D38",
-  heroInk: "#D9F3EC",
-  heroSub: "#7FB8AC",
-  onAccent: "#062E2A",
-  overlay: "rgba(0, 0, 0, 0.55)",
+  // ─────────────────────────────────────
+  // FOUNDATION
+  // ─────────────────────────────────────
+  bg: "#0B100E",          // Near-black forest
+  surface: "#121916",      // Elevated surface
+  well: "#19221E",        // Input / inset surface
+
+  // ─────────────────────────────────────
+  // TEXT
+  // ─────────────────────────────────────
+  ink: "#F2F0E8",         // Warm white
+  inkSoft: "#A9AEA8",     // Soft gray-green
+  muted: "#707872",
+  line: "#222B27",
+  lineStrong: "#34403A",
+
+  // ─────────────────────────────────────
+  // PRIMARY — EMERALD
+  // ─────────────────────────────────────
+  accent: "#35A88F",
+  accentStrong: "#4DBDA5",
+  accentSoft: "#12342D",
+  accentBorder: "rgba(53, 168, 143, 0.38)",
+  accentGlow: "rgba(53, 168, 143, 0.32)",
+
+  // ─────────────────────────────────────
+  // SECONDARY — CHAMPAGNE GOLD
+  // ─────────────────────────────────────
+  accent2: "#D0AD67",
+  accent2Soft: "#30291C",
+  accent2Border: "rgba(208, 173, 103, 0.38)",
+  accent2Glow: "rgba(208, 173, 103, 0.28)",
+
+  // ─────────────────────────────────────
+  // STATUS
+  // ─────────────────────────────────────
+  error: "#E06A67",
+  success: "#4BC58F",
+  warning: "#D6AA5D",
+
+  // ─────────────────────────────────────
+  // HERO
+  // ─────────────────────────────────────
+  hero: "#0D302A",
+  heroInk: "#F0F3E8",
+  heroSub: "#91B5AA",
+
+  onAccent: "#061F1A",
+
+  // ─────────────────────────────────────
+  // OVERLAY / SHADOW
+  // ─────────────────────────────────────
+  overlay: "rgba(0, 0, 0, 0.62)",
   shadow: "#000000",
-  shadowOpacity: 0.45,
-};
+  shadowOpacity: 0.48,
+} as const;
 
 export const serif = Platform.select({
   ios: "Georgia",

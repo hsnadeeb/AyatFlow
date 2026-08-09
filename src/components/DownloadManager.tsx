@@ -73,16 +73,7 @@ export default function DownloadManager({
   useEffect(() => {
     if (visible && surah && ayahs.length > 0) {
       loadExistingProgress();
-      // Format the storage location for better user display
-      const rawLocation = downloadManager.getStorageLocation();
-      let displayLocation = rawLocation;
-      
-      if (Platform.OS === 'android') {
-        // Simplify the Android path for user display
-        displayLocation = '/storage/emulated/0/Android/data/com.hasnadeeb.ayahflow/files/AyatFlow/quran-audio/';
-      }
-      
-      setStorageLocation(displayLocation);
+      setStorageLocation(downloadManager.getStorageLocation());
     }
   }, [visible, surah, ayahs, loadExistingProgress, downloadManager]);
 
@@ -289,7 +280,9 @@ export default function DownloadManager({
                 : `${storageMb} MB of audio stored on this device.`}
             </Text>
             <Text style={styles.infoText}>
-              Download once, then listen offline — audio persists across app updates and most reinstalls. The app automatically syncs with existing files after reinstall, so you won't need to re-download.
+              Download once, then listen offline. Audio is mirrored to shared
+              storage, so even after reinstalling the app your downloads are
+              restored automatically — no need to re-download.
             </Text>
           </View>
 
@@ -302,7 +295,9 @@ export default function DownloadManager({
               {storageLocation}
             </Text>
             <Text style={styles.infoText}>
-              Files are organized by Surah number and language (Arabic/English) for easy access. The app automatically syncs with existing files after reinstall, preserving your downloads.
+              Files are organized by Surah number and language (Arabic/English)
+              for easy access. The app restores existing files after a reinstall,
+              preserving your downloads.
             </Text>
           </View>
         </ScrollView>
