@@ -38,7 +38,7 @@ For an Android APK:
 
 ```bash
 npm install
-npx expo prebuild --clean
+npx expo prebuild --no-clean
 npx eas build --platform android --profile preview
 ```
 
