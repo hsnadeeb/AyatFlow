@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { Surah } from "../api";
 import { radii, serif, useTheme, useThemedStyles } from "../theme";
+import QuickAyahWidget from "../widget/QuickAyahWidget";
 
 type Props = {
   surahs: Surah[];
@@ -19,9 +20,9 @@ type Props = {
   downloadingSurahs: Set<number>;
   bookmarksCount: number;
   onOpenSurah: (number: number, resumeIndex?: number) => void;
-  onOpenDownloadManager: (surahNumber: number) => void;
   onOpenSettings: () => void;
   onOpenBookmarks: () => void;
+  onWidgetPress?: () => void;
 };
 
 const ROW_HEIGHT = 68;
@@ -31,7 +32,6 @@ type RowProps = {
   heard: number | undefined;
   downloading: boolean;
   onOpen: (number: number, resumeIndex?: number) => void;
-  onDownload: (surahNumber: number) => void;
 };
 
 const SurahRow = React.memo(function SurahRow({
@@ -39,7 +39,6 @@ const SurahRow = React.memo(function SurahRow({
   heard,
   downloading,
   onOpen,
-  onDownload,
 }: RowProps) {
   const styles = useThemedStyles(createStyles);
 
@@ -64,24 +63,11 @@ const SurahRow = React.memo(function SurahRow({
           </Text>
           <Text style={styles.rowSub} numberOfLines={1}>
             {heard !== undefined
-              ? `${item.englishNameTranslation} · Ayah ${heard + 1} of ${item.numberOfAyahs}`
-              : item.englishNameTranslation}
+              ? `${item.englishNameTranslation} · ${heard + 1}/${item.numberOfAyahs} ayahs`
+              : `${item.englishNameTranslation} · ${item.numberOfAyahs} ayahs`}
           </Text>
         </View>
         <Text style={styles.rowArabic}>{item.name}</Text>
-        {downloading ? (
-          <View style={styles.downloadingBadge}>
-            <ActivityIndicator size="small" color={styles.accentColor.color} />
-          </View>
-        ) : (
-          <Pressable
-            style={styles.downloadBtn}
-            onPress={() => onDownload(item.number)}
-            hitSlop={6}
-          >
-            <Text style={styles.downloadIcon}>⬇</Text>
-          </Pressable>
-        )}
       </Pressable>
       {heard !== undefined && (
         <View style={styles.rowTrack}>
@@ -99,9 +85,9 @@ export default function HomeScreen({
   downloadingSurahs,
   bookmarksCount,
   onOpenSurah,
-  onOpenDownloadManager,
   onOpenSettings,
   onOpenBookmarks,
+  onWidgetPress,
 }: Props) {
   const styles = useThemedStyles(createStyles);
   const { palette: c, isDark } = useTheme();
@@ -132,10 +118,9 @@ export default function HomeScreen({
         heard={progress[item.number]}
         downloading={downloadingSurahs.has(item.number)}
         onOpen={onOpenSurah}
-        onDownload={onOpenDownloadManager}
       />
     ),
-    [progress, downloadingSurahs, onOpenSurah, onOpenDownloadManager]
+    [progress, downloadingSurahs, onOpenSurah]
   );
 
   const header = (
@@ -193,25 +178,13 @@ export default function HomeScreen({
       </View>
 
       {last && !query && (
-        <Pressable style={styles.resume} onPress={() => onOpenSurah(last.surah, last.ayahIndex)}>
-          <View style={styles.resumeTop}>
-            <View style={styles.resumeLeft}>
-              <Text style={styles.resumeEyebrow}>CONTINUE LISTENING</Text>
-              <Text style={styles.resumeTitle}>
-                {resumeSurah?.englishName ?? `Surah ${last.surah}`}
-              </Text>
-              <Text style={styles.resumeMeta}>
-                Ayah {last.ayahIndex + 1} of {resumeTotal} · Tap to resume
-              </Text>
-            </View>
-            <View style={styles.playBadge}>
-              <Text style={styles.playBadgeGlyph}>▶</Text>
-            </View>
-          </View>
-          <View style={styles.resumeTrack}>
-            <View style={[styles.resumeFill, { width: resumePct }]} />
-          </View>
-        </Pressable>
+        <QuickAyahWidget 
+          surahName={resumeSurah?.englishName ?? `Surah ${last.surah}`}
+          ayahNumber={last.ayahIndex + 1}
+          totalAyahs={resumeTotal}
+          progress={resumePct}
+          onPress={() => onOpenSurah(last.surah, last.ayahIndex)}
+        />
       )}
 
       <View style={styles.sectionRow}>

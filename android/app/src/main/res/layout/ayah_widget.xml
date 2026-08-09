@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#0F1113"
+    android:padding="16dp"
+    android:gravity="center">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="12dp">
+
+        <TextView
+            android:id="@+id/surah_name"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Al-Faatiha"
+            android:textColor="#A8A8B0"
+            android:textSize="12sp"
+            android:textAllCaps="true"
+            android:letterSpacing="0.1" />
+
+        <TextView
+            android:id="@+id/ayah_number"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Ayah 1"
+            android:textColor="#2BB5A5"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#262A2E"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/arabic_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ"
+        android:textColor="#F0EFEA"
+        android:textSize="18sp"
+        android:textAlignment="textEnd"
+        android:fontFamily="serif"
+        android:layout_marginBottom="8dp"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/translation"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="In the name of Allah, the Entirely Merciful, the Especially Merciful."
+        android:textColor="#A8A8B0"
+        android:textSize="12sp"
+        android:textAlignment="textStart"
+        android:layout_marginBottom="12dp"
+        android:maxLines="2"
+        android:ellipsize="end"
+        android:lineSpacingExtra="2dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Tap to continue reading"
+            android:textColor="#71717A"
+            android:textSize="10sp"
+            android:textStyle="italic" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Resume"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:padding="8dp"
+            android:background="#2BB5A5" />
+    </LinearLayout>
+
+</LinearLayout>

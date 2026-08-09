@@ -37,6 +37,7 @@ import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
 import { ThemeProvider, useTheme } from "./src/theme";
+import { saveLastPositionForWidget, initializeWidget } from "./src/widget/widgetManager";
 
 type Screen = "home" | "flow" | "settings" | "bookmarks";
 
@@ -145,6 +146,9 @@ function AppInner() {
         setLast(savedLast);
         setProgress(savedProgress);
         setAudioPrefs(savedAudioPrefs);
+        
+        // Initialize Android widget with current data
+        initializeWidget();
       } catch (error) {
         Alert.alert("Ayat Flow", "Could not load Quran data. Please check your connection.");
       } finally {
@@ -253,6 +257,7 @@ function AppInner() {
     setLast({ surah, ayahIndex });
     saveSurahProgress(surah, ayahIndex);
     setProgress((prev) => ({ ...prev, [surah]: ayahIndex }));
+    saveLastPositionForWidget(surah, ayahIndex); // Update Android home screen widget
   }
 
   function animateGlow(target: number, duration: number) {
@@ -735,14 +740,6 @@ function AppInner() {
     toggleAudio(s);
   }, []);
 
-  const onOpenDownloadManagerFromHome = useCallback(
-    (surahNumber: number) => {
-      openDownloadManager(surahNumber);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [surahs]
-  );
-
   const onOpenFlowDownloadManager = useCallback(() => {
     openFlowDownloadManager();
   }, []);
@@ -789,9 +786,9 @@ function AppInner() {
             downloadingSurahs={downloadingSurahs}
             bookmarksCount={bookmarks.length}
             onOpenSurah={openSurahHandler}
-            onOpenDownloadManager={onOpenDownloadManagerFromHome}
             onOpenSettings={onOpenSettings}
             onOpenBookmarks={onOpenBookmarks}
+            onWidgetPress={() => last && openSurahHandler(last.surah, last.ayahIndex)}
           />
           {loading && (
             <View style={styles.loadingOverlay}>
