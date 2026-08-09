@@ -3,7 +3,7 @@ import { StyleSheet, Text, View, TouchableOpacity, Animated, DimensionValue } fr
 import { useTheme } from '../theme';
 import { getSurah, Ayah, Surah } from '../api';
 import { getLastPosition } from '../storage';
-import { saveLastPositionForWidget } from './widgetManager';
+import { saveAyahDataForWidget } from './widgetManager';
 
 interface QuickAyahWidgetProps {
   surahName?: string;
@@ -62,8 +62,16 @@ export default function QuickAyahWidget({
         translation: ayah.translation,
       });
       
-      // Update Android home screen widget
-      saveLastPositionForWidget(lastPosition?.surah || 1, lastPosition?.ayahIndex || 0);
+      // Update Android home screen widget with actual ayah data
+      const displaySurahName = surahData.surah.name || `Surah ${lastPosition?.surah || 1}`;
+      const displayAyahNumber = `Ayat ${lastPosition?.ayahIndex !== undefined ? lastPosition.ayahIndex + 1 : 1}`;
+      
+      saveAyahDataForWidget(
+        displaySurahName,
+        displayAyahNumber,
+        ayah.text,
+        ayah.translation
+      );
     } catch (error) {
       console.error('Error loading widget content:', error);
     } finally {

@@ -37,25 +37,32 @@ type Props = {
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
 
-function Toggle({
-  label,
+function AudioToggle({
   icon,
+  label,
   value,
+  onBg,
+  onText,
   onToggle,
 }: {
-  label: string;
   icon: string;
+  label: string;
   value: boolean;
+  onBg: string;
+  onText: string;
   onToggle: () => void;
 }) {
   const styles = useThemedStyles(createStyles);
   return (
-    <Pressable style={styles.toggleRow} onPress={onToggle} accessibilityRole="switch" accessibilityState={{ checked: value }}>
-      <Text style={styles.toggleIcon}>{icon}</Text>
-      <Text style={styles.toggleLabel}>{label}</Text>
-      <View style={[styles.toggleTrack, value && styles.toggleTrackOn]}>
-        <View style={[styles.toggleKnob, value && styles.toggleKnobOn]} />
-      </View>
+    <Pressable
+      style={[styles.audioChip, value && { backgroundColor: onBg }]}
+      onPress={onToggle}
+      hitSlop={6}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: value }}
+      accessibilityLabel={label}
+    >
+      <Text style={[styles.audioChipText, value && { color: onText }]}>{icon}</Text>
     </Pressable>
   );
 }
@@ -146,11 +153,29 @@ const FlowScreen = React.memo(function FlowScreen({
             <View style={styles.ayatPill}>
               <Text style={styles.ayatPillText}>Ayat {currentAyah.numberInSurah}</Text>
             </View>
-            <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
-              <Animated.View
-                style={[styles.stageDot, { opacity: stage === "idle" ? 0.55 : dotOpacity }]}
+            <View style={styles.cardTopRight}>
+              <AudioToggle
+                icon="♪"
+                label="Recitation audio"
+                value={audioPrefs.arabic}
+                onBg={c.accentSoft}
+                onText={c.accent}
+                onToggle={() => onToggleAudio("arabic")}
               />
-              <Text style={styles.stagePillText}>{stageStatus.text}</Text>
+              <AudioToggle
+                icon="Aa"
+                label="Meaning audio"
+                value={audioPrefs.english}
+                onBg={c.accent2Soft}
+                onText={c.accent2}
+                onToggle={() => onToggleAudio("english")}
+              />
+              <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
+                <Animated.View
+                  style={[styles.stageDot, { opacity: stage === "idle" ? 0.55 : dotOpacity }]}
+                />
+                <Text style={styles.stagePillText}>{stageStatus.text}</Text>
+              </View>
             </View>
           </View>
 
@@ -183,38 +208,6 @@ const FlowScreen = React.memo(function FlowScreen({
           </Animated.Text>
         </View>
 
-        <View style={styles.settingsCard}>
-          <Text style={styles.settingsTitle}>Sound</Text>
-          <View style={styles.togglesRow}>
-            <Toggle
-              label="Recitation"
-              icon="♪"
-              value={audioPrefs.arabic}
-              onToggle={() => onToggleAudio("arabic")}
-            />
-            <Toggle
-              label="Meaning"
-              icon="Aa"
-              value={audioPrefs.english}
-              onToggle={() => onToggleAudio("english")}
-            />
-          </View>
-        </View>
-
-        <View style={styles.speedGroup}>
-          {SPEEDS.map((value) => (
-            <Pressable
-              key={value}
-              onPress={() => onSpeed(value)}
-              style={[styles.speedItem, speed === value && styles.speedItemActive]}
-            >
-              <Text style={[styles.speedText, speed === value && styles.speedTextActive]}>
-                {value}×
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
         <View style={styles.controls}>
           <Pressable style={styles.secondaryBtn} onPress={onPrevious} hitSlop={6} accessibilityLabel="Previous ayat">
             <Text style={styles.secondaryGlyph}>‹</Text>
@@ -232,6 +225,20 @@ const FlowScreen = React.memo(function FlowScreen({
           <Pressable style={styles.secondaryBtn} onPress={onNext} hitSlop={6} accessibilityLabel="Next ayah">
             <Text style={styles.secondaryGlyph}>›</Text>
           </Pressable>
+        </View>
+
+        <View style={styles.speedGroup}>
+          {SPEEDS.map((value) => (
+            <Pressable
+              key={value}
+              onPress={() => onSpeed(value)}
+              style={[styles.speedItem, speed === value && styles.speedItemActive]}
+            >
+              <Text style={[styles.speedText, speed === value && styles.speedTextActive]}>
+                {value}×
+              </Text>
+            </Pressable>
+          ))}
         </View>
 
         <Pressable style={styles.downloadBtn} onPress={onOpenDownloadManager}>
@@ -333,14 +340,14 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       backgroundColor: c.accent,
     },
     content: {
-      padding: 20,
-      paddingBottom: 44,
+      padding: 24,
+      paddingBottom: 48,
     },
     card: {
-      marginTop: 14,
+      marginTop: 24,
       borderRadius: radii.card,
       backgroundColor: c.surface,
-      padding: 22,
+      padding: 28,
       borderWidth: 1,
       borderColor: c.line,
       ...t.shadow,
@@ -352,7 +359,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       flexDirection: "row",
       justifyContent: "space-between",
       alignItems: "center",
-      marginBottom: 20,
+      marginBottom: 24,
     },
     ayatPill: {
       backgroundColor: c.well,
@@ -402,76 +409,24 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       lineHeight: 29,
       color: c.inkSoft,
     },
-    settingsCard: {
-      marginTop: 16,
-      backgroundColor: c.surface,
-      borderRadius: radii.card,
-      borderWidth: 1,
-      borderColor: c.line,
-      paddingHorizontal: 16,
-      paddingVertical: 12,
-    },
-    settingsTitle: {
-      fontSize: 11,
-      fontWeight: "700",
-      color: c.muted,
-      letterSpacing: 1.2,
-      textTransform: "uppercase",
-      marginBottom: 6,
-    },
-    togglesRow: {
-      flexDirection: "row",
-      gap: 14,
-    },
-    toggleRow: {
-      flex: 1,
+    cardTopRight: {
       flexDirection: "row",
       alignItems: "center",
       gap: 8,
-      paddingVertical: 6,
     },
-    toggleIcon: {
-      width: 30,
-      height: 30,
-      borderRadius: 15,
+    audioChip: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
       backgroundColor: c.well,
-      textAlign: "center",
-      lineHeight: 30,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    audioChipText: {
       fontSize: 13,
       fontWeight: "700",
-      color: c.inkSoft,
-      overflow: "hidden",
-    },
-    toggleLabel: {
-      flex: 1,
-      fontSize: 14,
-      fontWeight: "600",
-      color: c.ink,
-    },
-    toggleTrack: {
-      width: 40,
-      height: 24,
-      borderRadius: 12,
-      backgroundColor: c.lineStrong,
-      justifyContent: "center",
-      paddingHorizontal: 3,
-    },
-    toggleTrackOn: {
-      backgroundColor: c.accentSoft,
-    },
-    toggleKnob: {
-      width: 18,
-      height: 18,
-      borderRadius: 9,
-      backgroundColor: "#FFFFFF",
-      ...t.shadow,
-      shadowRadius: 4,
-      shadowOffset: { width: 0, height: 1 },
-      elevation: 2,
-    },
-    toggleKnobOn: {
-      alignSelf: "flex-end",
-      backgroundColor: c.accent,
+      lineHeight: 16,
+      color: c.muted,
     },
     speedGroup: {
       flexDirection: "row",
@@ -482,7 +437,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       borderColor: c.line,
       padding: 4,
       gap: 2,
-      marginTop: 18,
+      marginTop: 24,
     },
     speedItem: {
       paddingHorizontal: 13,
@@ -501,7 +456,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.bg,
     },
     controls: {
-      marginTop: 20,
+      marginTop: 32,
       flexDirection: "row",
       justifyContent: "center",
       alignItems: "center",
@@ -539,7 +494,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignSelf: "center",
       paddingHorizontal: 16,
       paddingVertical: 10,
-      marginTop: 16,
+      marginTop: 24,
     },
     repeatText: {
       color: c.inkSoft,
@@ -554,7 +509,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignItems: "center",
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: c.line,
-      marginTop: 8,
+      marginTop: 24,
     },
     downloadBtnText: {
       fontSize: 14,

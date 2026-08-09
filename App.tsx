@@ -13,22 +13,11 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
   AudioModule,
   requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-  useAudioPlayer,
 } from "expo-audio";
-import * as Speech from "expo-speech";
-import * as FileSystem from "expo-file-system/legacy";
 import { getSurah, getSurahs, Ayah, Surah } from "./src/api";
 import {
-  getAudioPrefs,
   getBookmarks,
-  getLastPosition,
-  getSurahProgress,
-  saveAudioPrefs,
-  saveLastPosition,
-  saveSurahProgress,
   toggleBookmark,
-  AudioPrefs,
 } from "./src/storage";
 import HomeScreen from "./src/components/HomeScreen";
 import FlowScreen from "./src/components/FlowScreen";
@@ -37,7 +26,13 @@ import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
 import { ThemeProvider, useTheme } from "./src/theme";
-import { saveLastPositionForWidget, initializeWidget } from "./src/widget/widgetManager";
+import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetManager";
+import { playbackController } from "./src/playback/playbackController";
+import { registerWidgetPlaybackTask } from "./src/widget/WidgetPlaybackTask";
+
+// Register the headless task used by the home screen widget controls.
+// This must run at module load so the native side can find the task.
+registerWidgetPlaybackTask();
 
 type Screen = "home" | "flow" | "settings" | "bookmarks";
 
@@ -58,39 +53,32 @@ function AppInner() {
   const [screen, setScreen] = useState<Screen>("home");
   const [surahs, setSurahs] = useState<Surah[]>([]);
   const [loading, setLoading] = useState(true);
-  const [flowData, setFlowData] = useState<{ surah: Surah; ayahs: Ayah[] } | null>(null);
-  const [index, setIndex] = useState(0);
-  const [speed, setSpeed] = useState(1);
-  const [playing, setPlaying] = useState(false);
-  const [stage, setStage] = useState<"idle" | "arabic" | "english">("idle");
   const [bookmarks, setBookmarks] = useState<string[]>([]);
-  const [last, setLast] = useState<{ surah: number; ayahIndex: number } | null>(null);
-  const [progress, setProgress] = useState<Record<number, number>>({});
-  const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>({ arabic: true, english: true });
   const [downloadManagerVisible, setDownloadManagerVisible] = useState(false);
   const [downloadManagerSurah, setDownloadManagerSurah] = useState<Surah | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadingSurahs, setDownloadingSurahs] = useState<Set<number>>(new Set());
-  const englishTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const advancingRef = useRef(false);
-  const playingRef = useRef(false);
-  const stageRef = useRef<"idle" | "arabic" | "english">("idle");
-  const permissionAsked = useRef(false);
-  const pulseRef = useRef<Animated.CompositeAnimation | null>(null);
-  const flowRef = useRef<{ surah: Surah; ayahs: Ayah[] } | null>(null);
-  const indexRef = useRef(0);
-  const speedRef = useRef(1);
-  const audioPrefsRef = useRef(audioPrefs);
-  const screenRef = useRef<Screen>("home");
-  const sessionRef = useRef(0);
-  const lastDidJustFinish = useRef(false);
-  const arabicStartedRef = useRef(false);
-  const englishStartedRef = useRef(false);
+
+  // Playback state mirrored from the shared controller
+  const [flowData, setFlowData] = useState<{ surah: Surah; ayahs: Ayah[] } | null>(
+    playbackController.getState().flow
+  );
+  const [index, setIndex] = useState(playbackController.getState().index);
+  const [stage, setStage] = useState(playbackController.getState().stage);
+  const [playing, setPlaying] = useState(playbackController.getState().playing);
+  const [speed, setSpeed] = useState(playbackController.getState().speed);
+  const [audioPrefs, setAudioPrefs] = useState(playbackController.getState().audioPrefs);
+  const [last, setLast] = useState(playbackController.getState().last);
+  const [progress, setProgress] = useState(playbackController.getState().progress);
+
   const [samplingRetry, setSamplingRetry] = useState(0);
 
   const glow = useRef(new Animated.Value(0)).current;
+  const pulseRef = useRef<Animated.CompositeAnimation | null>(null);
+  const permissionAsked = useRef(false);
+  const playingRef = useRef(playing);
+  const stageRef = useRef(stage);
+  const flowRef = useRef(flowData);
 
   useEffect(() => {
     playingRef.current = playing;
@@ -101,54 +89,50 @@ function AppInner() {
   }, [stage]);
 
   useEffect(() => {
-    screenRef.current = screen;
-  }, [screen]);
-
-  useEffect(() => {
     flowRef.current = flowData;
   }, [flowData]);
 
+  // Mirror controller state into local UI state
   useEffect(() => {
-    indexRef.current = index;
-  }, [index]);
-
-  useEffect(() => {
-    speedRef.current = speed;
-  }, [speed]);
-
-  useEffect(() => {
-    audioPrefsRef.current = audioPrefs;
-  }, [audioPrefs]);
-
-  const player = useAudioPlayer(null, {
-    updateInterval: 250,
-    downloadFirst: false,
-  });
+    const unsubscribe = playbackController.subscribe((state) => {
+      setFlowData(state.flow);
+      setIndex(state.index);
+      setStage(state.stage);
+      setPlaying(state.playing);
+      setSpeed(state.speed);
+      setAudioPrefs(state.audioPrefs);
+      setLast(state.last);
+      setProgress(state.progress);
+    });
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     (async () => {
       try {
-        await setAudioModeAsync({
-          playsInSilentMode: true,
-          shouldPlayInBackground: true,
-          interruptionMode: "doNotMix",
-        });
-        const [loadedSurahs, savedBookmarks, savedLast, savedProgress, savedAudioPrefs] =
-          await Promise.all([
-            getSurahs(),
-            getBookmarks(),
-            getLastPosition(),
-            getSurahProgress(),
-            getAudioPrefs(),
-          ]);
+        const [loadedSurahs, savedBookmarks] = await Promise.all([
+          getSurahs(),
+          getBookmarks(),
+        ]);
         setSurahs(loadedSurahs);
         setBookmarks(savedBookmarks);
-        setLast(savedLast);
-        setProgress(savedProgress);
-        setAudioPrefs(savedAudioPrefs);
-        
-        // Initialize Android widget with current data
+
+        playbackController.alertHandler = (title, message) => {
+          Alert.alert(title, message);
+        };
+
+        await playbackController.ensureInitialized();
         initializeWidget();
+
+        // Correct stale widget state (e.g. process was killed while "playing")
+        if (!playbackController.isPlaying()) {
+          setWidgetPlayingState(false);
+        }
+
+        // Cold start while background playback is already running: show the player
+        if (playbackController.getState().flow) {
+          setScreen("flow");
+        }
       } catch (error) {
         Alert.alert("Ayat Flow", "Could not load Quran data. Please check your connection.");
       } finally {
@@ -157,44 +141,11 @@ function AppInner() {
     })();
 
     return () => {
-      if (englishTimer.current) {
-        clearInterval(englishTimer.current);
-        englishTimer.current = null;
-      }
-      if (transitionTimer.current) clearTimeout(transitionTimer.current);
-      clearReadingTimer();
       stopPulse();
-      Speech.stop();
-      arabicStartedRef.current = false;
-      englishStartedRef.current = false;
-      lastDidJustFinish.current = false;
-      sessionRef.current++;
       cleanupDownloadManager();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Completion detection via player events. This replaces the per-250ms status
-  // subscription, so the app no longer re-renders on every audio status tick.
-  useEffect(() => {
-    const subscription = player.addListener("playbackStatusUpdate", (status) => {
-      const justFinished = status.didJustFinish;
-      if (justFinished && !lastDidJustFinish.current) {
-        lastDidJustFinish.current = true;
-        if (!playingRef.current || screenRef.current !== "flow") return;
-        const s = stageRef.current;
-        if (s === "arabic" && arabicStartedRef.current) {
-          startEnglish();
-        } else if (s === "english" && englishStartedRef.current) {
-          advance();
-        }
-      } else if (!justFinished) {
-        lastDidJustFinish.current = false;
-      }
-    });
-    return () => subscription.remove();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player]);
 
   const handleSample = React.useCallback((sample: { channels: { frames: number[] }[] }) => {
     if (stageRef.current === "idle") return;
@@ -208,11 +159,12 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
+    const player = playbackController.player;
     if (!player.isAudioSamplingSupported) return;
     player.setAudioSamplingEnabled(true);
     const subscription = player.addListener("audioSampleUpdate", handleSample);
     return () => subscription.remove();
-  }, [player.id, samplingRetry, player, handleSample]);
+  }, [playbackController.player.id, samplingRetry, playbackController.player, handleSample]);
 
   const currentAyah = flowData?.ayahs[index];
 
@@ -223,58 +175,9 @@ function AppInner() {
     }
   }
 
-  function sleep(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async function waitForCondition(condition: () => boolean, timeoutMs: number) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (condition()) return true;
-      await sleep(100);
-    }
-    return condition();
-  }
-
-  function clearStageState() {
-    arabicStartedRef.current = false;
-    englishStartedRef.current = false;
-    if (englishTimer.current) {
-      clearInterval(englishTimer.current);
-      englishTimer.current = null;
-    }
-  }
-
-  function clearReadingTimer() {
-    if (readingTimer.current) {
-      clearTimeout(readingTimer.current);
-      readingTimer.current = null;
-    }
-  }
-
-  function saveFlowPosition(surah: number, ayahIndex: number) {
-    saveLastPosition({ surah, ayahIndex });
-    setLast({ surah, ayahIndex });
-    saveSurahProgress(surah, ayahIndex);
-    setProgress((prev) => ({ ...prev, [surah]: ayahIndex }));
-    saveLastPositionForWidget(surah, ayahIndex); // Update Android home screen widget
-  }
-
   function animateGlow(target: number, duration: number) {
     glow.stopAnimation();
     Animated.timing(glow, { toValue: target, duration, useNativeDriver: false }).start();
-  }
-
-  function startPulseGlow() {
-    stopPulse();
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(glow, { toValue: 1, duration: 620, useNativeDriver: false }),
-        Animated.timing(glow, { toValue: 0.32, duration: 620, useNativeDriver: false }),
-      ])
-    );
-    pulseRef.current = loop;
-    loop.start();
   }
 
   async function ensureSampling() {
@@ -316,317 +219,13 @@ function AppInner() {
     }
   }
 
-  function stopAll() {
-    sessionRef.current++;
-    player.pause();
-    Speech.stop();
-    advancingRef.current = false;
-    playingRef.current = false;
-    setPlaying(false);
-    setStage("idle");
-    stopPulse();
-    glow.setValue(0);
-    clearReadingTimer();
-    clearStageState();
-    if (transitionTimer.current) {
-      clearTimeout(transitionTimer.current);
-      transitionTimer.current = null;
-    }
-  }
-
-  async function startArabic() {
-    const session = ++sessionRef.current;
-    const data = flowRef.current;
-    const ayah = data?.ayahs[indexRef.current];
-    if (!data || !ayah || screenRef.current !== "flow") return;
-
-    // Clean up any existing audio playback
-    player.pause();
-    Speech.stop();
-    advancingRef.current = false;
-    clearReadingTimer();
-    stopPulse();
-    glow.setValue(0);
-    clearStageState();
-    if (transitionTimer.current) {
-      clearTimeout(transitionTimer.current);
-      transitionTimer.current = null;
-    }
-
-    // Set stage and playing state
-    setStage("arabic");
-    setPlaying(true);
-    playingRef.current = true;
-
-    // Check if both audio types are disabled
-    if (!audioPrefsRef.current.arabic && !audioPrefsRef.current.english) {
-      Alert.alert("Audio Disabled", "Please enable at least one audio option in settings.");
-      stopAll();
-      return;
-    }
-
-    // Check if Arabic audio is enabled
-    if (!audioPrefsRef.current.arabic) {
-      // Immediately start English without waiting
-      startEnglish();
-      return;
-    }
-
-    if (!ayah.audio) {
-      Alert.alert("Audio unavailable", "This ayah does not have an audio URL.");
-      setPlaying(false);
-      playingRef.current = false;
-      setStage("idle");
-      return;
-    }
-
-    // Check for local audio file first
-    const downloadManager = getDownloadManager();
-    let localAudioPath: string | null = null;
-    try {
-      localAudioPath = await downloadManager.getLocalAudioPath(
-        data.surah.number,
-        ayah.number,
-        "arabic"
-      );
-    } catch {}
-    if (session !== sessionRef.current) return;
-
-    const audioSource = localAudioPath || ayah.audio;
-
-    try {
-      ensureSampling();
-      startPulseGlow();
-      player.replace(audioSource);
-      player.setPlaybackRate(speedRef.current);
-      player.play();
-
-      // Wait until the player has actually loaded the Arabic source before
-      // marking the stage as started. Without this, the stale didJustFinish
-      // flag from the previous English segment could skip the Arabic.
-      const loaded = await waitForCondition(() => player.isLoaded || player.playing, 10000);
-      if (session !== sessionRef.current) return;
-      if (!loaded) throw new Error("Arabic audio did not load");
-
-      arabicStartedRef.current = true;
-      startPositionMonitoring();
-    } catch (error) {
-      console.error("Failed to play Arabic audio:", error);
-      if (session !== sessionRef.current) return;
-      Alert.alert("Audio Error", "Could not play Arabic audio. Skipping to English.");
-      startEnglish();
-    }
-  }
-
-  async function startEnglish() {
-    const session = ++sessionRef.current;
-    const ayah = flowRef.current?.ayahs[indexRef.current];
-    if (!ayah || screenRef.current !== "flow") return;
-
-    // Clean up existing audio
-    player.pause();
-    Speech.stop();
-    clearStageState();
-    if (transitionTimer.current) {
-      clearTimeout(transitionTimer.current);
-      transitionTimer.current = null;
-    }
-
-    setStage("english");
-    startPulseGlow();
-
-    // Check if English audio is enabled
-    if (!audioPrefsRef.current.english) {
-      // Immediately advance to next ayah without waiting
-      advance();
-      return;
-    }
-
-    // Check for local audio file first
-    const downloadManager = getDownloadManager();
-    let audioSource: string | null = null;
-    try {
-      const localAudioPath = await downloadManager.getLocalAudioPath(
-        flowRef.current?.surah.number || 0,
-        ayah.number,
-        "english"
-      );
-      if (session !== sessionRef.current) return;
-
-      if (localAudioPath) {
-        const fileInfo = await FileSystem.getInfoAsync(localAudioPath);
-        if (session !== sessionRef.current) return;
-        if (fileInfo.exists && fileInfo.size > 0) {
-          audioSource = localAudioPath;
-        }
-      }
-    } catch {}
-
-    if (!audioSource) {
-      // Use englishAudio URL if available
-      audioSource =
-        ayah.englishAudio && ayah.englishAudio.trim() !== "" ? ayah.englishAudio : null;
-    }
-    if (session !== sessionRef.current) return;
-
-    if (audioSource) {
-      try {
-        player.replace(audioSource);
-        player.setPlaybackRate(speedRef.current);
-        player.play();
-
-        const loaded = await waitForCondition(() => player.isLoaded || player.playing, 10000);
-        if (session !== sessionRef.current) return;
-        if (!loaded) throw new Error("English audio did not load");
-
-        englishStartedRef.current = true;
-        startPositionMonitoring();
-      } catch (error) {
-        console.error("Failed to play English audio:", error);
-        if (session !== sessionRef.current) return;
-        // Fall back to text-to-speech if audio fails
-        fallbackToTextToSpeech(ayah);
-      }
-    } else {
-      // Fall back to text-to-speech if no audio file
-      fallbackToTextToSpeech(ayah);
-    }
-  }
-
-  function startPositionMonitoring() {
-    // Clear any existing monitoring
-    if (englishTimer.current) {
-      clearInterval(englishTimer.current);
-      englishTimer.current = null;
-    }
-
-    // Monitor position progress every 250ms as a backup to didJustFinish.
-    // Uses currentTime (expo-audio property; "position" does not exist).
-    englishTimer.current = setInterval(() => {
-      if (!playingRef.current) return;
-
-      const s = stageRef.current;
-      const started =
-        s === "arabic" ? arabicStartedRef.current : englishStartedRef.current;
-      if (s === "idle" || !started) return;
-
-      const duration = player.duration;
-      const currentTime = player.currentTime;
-
-      const nearEnd = Number.isFinite(duration) && duration > 0 && currentTime >= duration - 0.2;
-      const stoppedEarly =
-        player.isLoaded && !player.playing && !player.isBuffering && currentTime > 0.05;
-
-      if (nearEnd || stoppedEarly) {
-        if (englishTimer.current) {
-          clearInterval(englishTimer.current);
-          englishTimer.current = null;
-        }
-        if (s === "arabic") startEnglish();
-        else advance();
-      }
-    }, 250);
-  }
-
-  function fallbackToTextToSpeech(ayah: Ayah) {
-    Speech.speak(ayah.translation, {
-      language: "en-US",
-      rate: Math.min(1.0, 0.62 * speedRef.current),
-      pitch: 1,
-      onDone: () => {
-        if (playingRef.current) {
-          advance();
-        }
-      },
-      onStopped: () => {
-        // Text-to-speech stopped
-      },
-      onError: (error) => {
-        console.error("Text-to-speech error:", error);
-        if (playingRef.current) {
-          advance();
-        }
-      },
-    });
-  }
-
-  function startFlow() {
-    if (!flowRef.current) return;
-    setPlaying(true);
-    startArabic();
-  }
-
-  function advance() {
-    const data = flowRef.current;
-    if (!data || advancingRef.current) return;
-
-    advancingRef.current = true;
-    sessionRef.current++;
-
-    const current = indexRef.current;
-    if (current >= data.ayahs.length - 1) {
-      stopAll();
-      saveFlowPosition(data.surah.number, current);
-      return;
-    }
-
-    const next = current + 1;
-    setIndex(next);
-    saveFlowPosition(data.surah.number, next);
-
-    // Clear any existing transition timer and stage state
-    if (transitionTimer.current) {
-      clearTimeout(transitionTimer.current);
-      transitionTimer.current = null;
-    }
-    clearStageState();
-
-    // Small delay before starting next ayah to ensure clean transition
-    transitionTimer.current = setTimeout(() => {
-      advancingRef.current = false;
-      if (playingRef.current && screenRef.current === "flow") {
-        startArabic();
-      }
-    }, 300);
-  }
-
-  function skip() {
-    if (!flowRef.current) return;
-    Speech.stop();
-    player.pause();
-    advance();
-  }
-
-  function previous() {
-    const data = flowRef.current;
-    if (!data) return;
-    stopAll();
-    const next = Math.max(0, indexRef.current - 1);
-    setIndex(next);
-    saveFlowPosition(data.surah.number, next);
-  }
-
-  function repeat() {
-    stopAll();
-    setTimeout(() => {
-      startArabic();
-    }, 100);
-  }
-
   async function bookmarkCurrent() {
     const data = flowRef.current;
-    const ayah = data?.ayahs[indexRef.current];
+    const ayah = data?.ayahs[index];
     if (!data || !ayah) return;
     const key = `${data.surah.number}:${ayah.numberInSurah}`;
     const next = await toggleBookmark(key);
     setBookmarks(next);
-  }
-
-  function changeSpeed(next: number) {
-    setSpeed(next);
-    if (stageRef.current === "arabic" || stageRef.current === "english") {
-      player.setPlaybackRate(next);
-    }
   }
 
   async function openSurah(number: number, resumeIndex = 0) {
@@ -634,16 +233,7 @@ function AppInner() {
     setLoading(true);
     try {
       const data = await getSurah(number);
-      setFlowData(data);
-      setIndex(Math.min(resumeIndex, data.ayahs.length - 1));
-      setStage("idle");
-      setPlaying(false);
-      advancingRef.current = false;
-      stopPulse();
-      glow.setValue(0);
-      clearReadingTimer();
-      sessionRef.current++;
-      clearStageState();
+      playbackController.loadSurah(data, resumeIndex);
       setDownloadManagerSurah(data.surah);
       setScreen("flow");
 
@@ -676,34 +266,20 @@ function AppInner() {
     setDownloadManagerVisible(false);
   }
 
-  function toggleAudio(stage: "arabic" | "english") {
-    const prev = audioPrefsRef.current;
-    const next: AudioPrefs =
-      stage === "arabic" ? { ...prev, arabic: !prev.arabic } : { ...prev, english: !prev.english };
-    audioPrefsRef.current = next;
-    setAudioPrefs(next);
-    saveAudioPrefs(next);
-
-    if (playingRef.current && stageRef.current === stage) {
-      if (stage === "arabic") startArabic();
-      else startEnglish();
-    }
-  }
-
   // ---- Memoized handlers for child components ----
 
   const onBack = useCallback(() => {
-    stopAll();
+    playbackController.stopAll();
     setScreen("home");
   }, []);
 
   const onOpenSettings = useCallback(() => {
-    stopAll();
+    playbackController.stopAll();
     setScreen("settings");
   }, []);
 
   const onOpenBookmarks = useCallback(() => {
-    stopAll();
+    playbackController.stopAll();
     setScreen("bookmarks");
   }, []);
 
@@ -712,24 +288,24 @@ function AppInner() {
   }, []);
 
   const onTogglePlay = useCallback(() => {
-    if (playingRef.current) stopAll();
-    else startFlow();
+    if (playingRef.current) playbackController.stopAll();
+    else playbackController.startFlow();
   }, []);
 
   const onPrevious = useCallback(() => {
-    previous();
+    playbackController.previous();
   }, []);
 
   const onNext = useCallback(() => {
-    skip();
+    playbackController.skip();
   }, []);
 
   const onRepeat = useCallback(() => {
-    repeat();
+    playbackController.repeat();
   }, []);
 
   const onSpeed = useCallback((next: number) => {
-    changeSpeed(next);
+    playbackController.changeSpeed(next);
   }, []);
 
   const onBookmark = useCallback(() => {
@@ -737,7 +313,7 @@ function AppInner() {
   }, []);
 
   const onToggleAudio = useCallback((s: "arabic" | "english") => {
-    toggleAudio(s);
+    playbackController.toggleAudio(s);
   }, []);
 
   const onOpenFlowDownloadManager = useCallback(() => {
@@ -746,10 +322,6 @@ function AppInner() {
 
   const onCloseDownloadManager = useCallback(() => {
     closeDownloadManager();
-  }, []);
-
-  const onDownloadComplete = useCallback(() => {
-    // Audio data is read from the download manager on demand; nothing to refresh.
   }, []);
 
   const openSurahHandler = useCallback(
@@ -877,7 +449,6 @@ function AppInner() {
           surah={downloadManagerSurah}
           ayahs={flowData?.ayahs || []}
           onClose={onCloseDownloadManager}
-          onDownloadComplete={onDownloadComplete}
         />
       </SafeAreaView>
     </SafeAreaProvider>

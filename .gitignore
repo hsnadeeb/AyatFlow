@@ -4,4 +4,3 @@ dist
 ios
 .env
 *.log
-android

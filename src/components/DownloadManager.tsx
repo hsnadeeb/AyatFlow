@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,7 +19,6 @@ type Props = {
   surah: Surah | null;
   ayahs: Ayah[];
   onClose: () => void;
-  onDownloadComplete?: () => void;
 };
 
 export default function DownloadManager({
@@ -26,7 +26,6 @@ export default function DownloadManager({
   surah,
   ayahs,
   onClose,
-  onDownloadComplete,
 }: Props) {
   const styles = useThemedStyles(createStyles);
   const { palette: c } = useTheme();
@@ -35,6 +34,7 @@ export default function DownloadManager({
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [storageMb, setStorageMb] = useState<string | null>(null);
+  const [storageLocation, setStorageLocation] = useState<string>('');
   const progressRef = useRef<Record<string, number>>({});
   const downloadManager = getDownloadManager();
 
@@ -73,8 +73,18 @@ export default function DownloadManager({
   useEffect(() => {
     if (visible && surah && ayahs.length > 0) {
       loadExistingProgress();
+      // Format the storage location for better user display
+      const rawLocation = downloadManager.getStorageLocation();
+      let displayLocation = rawLocation;
+      
+      if (Platform.OS === 'android') {
+        // Simplify the Android path for user display
+        displayLocation = '/storage/emulated/0/Android/data/com.hasnadeeb.ayahflow/files/AyatFlow/quran-audio/';
+      }
+      
+      setStorageLocation(displayLocation);
     }
-  }, [visible, surah, ayahs, loadExistingProgress]);
+  }, [visible, surah, ayahs, loadExistingProgress, downloadManager]);
 
   const recomputeTotal = useCallback(() => {
     const values = Object.values(progressRef.current);
@@ -102,7 +112,6 @@ export default function DownloadManager({
       );
       setDownloadedCount(ayahs.length);
       setTotalProgress(1);
-      onDownloadComplete?.();
       refreshStorage();
     } catch (error) {
       console.error("Download failed:", error);
@@ -116,7 +125,6 @@ export default function DownloadManager({
     isDownloading,
     downloadManager,
     recomputeTotal,
-    onDownloadComplete,
     refreshStorage,
   ]);
 
@@ -158,6 +166,40 @@ export default function DownloadManager({
       );
     }
   }, [surah, ayahs.length, downloadManager]);
+
+  const handleShareArabic = useCallback(async () => {
+    if (!surah || ayahs.length === 0) return;
+    // Share the first available Arabic audio file
+    for (const ayah of ayahs) {
+      const isDownloaded = await downloadManager.isDownloaded(surah.number, ayah.number, 'arabic');
+      if (isDownloaded) {
+        try {
+          await downloadManager.shareAudioFile(surah.number, ayah.number, 'arabic');
+          return;
+        } catch (error) {
+          console.error('Failed to share Arabic audio:', error);
+        }
+      }
+    }
+    Alert.alert("Share Failed", "No downloaded Arabic audio found. Please download Arabic audio first.");
+  }, [surah, ayahs, downloadManager]);
+
+  const handleShareEnglish = useCallback(async () => {
+    if (!surah || ayahs.length === 0) return;
+    // Share the first available English audio file
+    for (const ayah of ayahs) {
+      const isDownloaded = await downloadManager.isDownloaded(surah.number, ayah.number, 'english');
+      if (isDownloaded) {
+        try {
+          await downloadManager.shareAudioFile(surah.number, ayah.number, 'english');
+          return;
+        } catch (error) {
+          console.error('Failed to share English audio:', error);
+        }
+      }
+    }
+    Alert.alert("Share Failed", "No downloaded English audio found. Please download English audio first.");
+  }, [surah, ayahs, downloadManager]);
 
   if (!surah) return null;
 
@@ -224,9 +266,14 @@ export default function DownloadManager({
 
             {downloadedCount > 0 && (
               <>
-                <Pressable style={styles.shareBtn} onPress={handleShare}>
-                  <Text style={styles.shareBtnText}>Share Audio</Text>
-                </Pressable>
+                <View style={styles.shareButtonGroup}>
+                  <Pressable style={styles.shareBtn} onPress={handleShareArabic}>
+                    <Text style={styles.shareBtnText}>Share Arabic</Text>
+                  </Pressable>
+                  <Pressable style={styles.shareBtn} onPress={handleShareEnglish}>
+                    <Text style={styles.shareBtnText}>Share English</Text>
+                  </Pressable>
+                </View>
                 <Pressable style={styles.deleteBtn} onPress={handleDelete}>
                   <Text style={styles.deleteBtnText}>Delete Downloaded Audio</Text>
                 </Pressable>
@@ -242,8 +289,20 @@ export default function DownloadManager({
                 : `${storageMb} MB of audio stored on this device.`}
             </Text>
             <Text style={styles.infoText}>
-              Download once, then listen offline — audio persists even after reinstalls, and you can
-              share it with other devices.
+              Download once, then listen offline — audio persists across app updates and most reinstalls. The app automatically syncs with existing files after reinstall, so you won't need to re-download.
+            </Text>
+          </View>
+
+          <View style={styles.infoCard}>
+            <Text style={styles.infoTitle}>Storage Location</Text>
+            <Text style={styles.infoText}>
+              Audio files are stored in:
+            </Text>
+            <Text style={styles.locationText}>
+              {storageLocation}
+            </Text>
+            <Text style={styles.infoText}>
+              Files are organized by Surah number and language (Arabic/English) for easy access. The app automatically syncs with existing files after reinstall, preserving your downloads.
             </Text>
           </View>
         </ScrollView>
@@ -367,6 +426,10 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       marginBottom: 24,
       gap: 12,
     },
+    shareButtonGroup: {
+      flexDirection: "row",
+      gap: 12,
+    },
     downloadBtn: {
       backgroundColor: c.accent,
       borderRadius: radii.card,
@@ -374,12 +437,8 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       paddingHorizontal: 24,
       alignItems: "center",
     },
-    downloadBtnText: {
-      color: c.onAccent,
-      fontSize: 16,
-      fontWeight: "700",
-    },
     shareBtn: {
+      flex: 1,
       backgroundColor: c.surface,
       borderRadius: radii.card,
       paddingVertical: 16,
@@ -387,6 +446,11 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignItems: "center",
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: c.line,
+    },
+    downloadBtnText: {
+      color: c.onAccent,
+      fontSize: 16,
+      fontWeight: "700",
     },
     shareBtnText: {
       color: c.accent,
@@ -425,6 +489,16 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.muted,
       lineHeight: 19,
       marginBottom: 6,
+    },
+    locationText: {
+      fontSize: 12,
+      color: c.accent,
+      fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+      backgroundColor: c.well,
+      padding: 8,
+      borderRadius: 4,
+      marginBottom: 6,
+      marginTop: 4,
     },
   });
 }

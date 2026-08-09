@@ -1,8 +1,9 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
 import { Platform } from 'react-native';
 
-const AUDIO_DIRECTORY = 'quran-audio';
+const AUDIO_DIRECTORY = 'AyatFlow/quran-audio';
 const DOWNLOAD_STATUS_KEY = 'ayah-flow:download-status';
 
 export type DownloadStatus = {
@@ -34,8 +35,12 @@ class DownloadManager {
 
   private getAudioDirectory(): string {
     if (Platform.OS === 'android') {
-      // Use external storage for Android to survive app reinstalls
-      return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
+      // Use external storage for Android
+      // externalDirectory typically maps to /storage/emulated/0/Android/data/com.hasnadeeb.ayahflow/files/
+      // This persists across app updates but may be removed on complete uninstall
+      // For true persistence across reinstalls, we would need to use MediaStore API
+      // However, for now this provides the best balance of functionality and user experience
+      return `${FileSystem.externalDirectory}${AUDIO_DIRECTORY}/`;
     } else {
       // iOS app group directory or documents directory
       return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
@@ -54,7 +59,8 @@ class DownloadManager {
   }
 
   private getFileName(surahNumber: number, ayahNumber: number, type: 'arabic' | 'english'): string {
-    return `${surahNumber}_${ayahNumber}_${type}.mp3`;
+    // Organize files by surah and language for better categorization
+    return `Surah${surahNumber}/${type}/${ayahNumber}.mp3`;
   }
 
   private async loadStatus(): Promise<void> {
@@ -79,6 +85,116 @@ class DownloadManager {
     } catch (error) {
       // File doesn't exist yet, initialize empty cache
       this.statusCache = {};
+    }
+    
+    // Sync with actual files on disk (for app reinstalls)
+    await this.syncWithDiskFiles();
+  }
+  
+  private async syncWithDiskFiles(): Promise<void> {
+    try {
+      await this.ensureDirectoryExists();
+      const files = await FileSystem.readDirectoryAsync(this.audioDir);
+      
+      // Rebuild status cache based on actual files
+      // Handle both flat structure (old) and hierarchical structure (new)
+      for (const file of files) {
+        const filePath = `${this.audioDir}${file}`;
+        const fileInfo = await FileSystem.getInfoAsync(filePath);
+        
+        if (fileInfo.exists && fileInfo.isDirectory) {
+          // This is a directory (new hierarchical structure)
+          await this.syncHierarchicalDirectory(filePath, file);
+        } else if (file.endsWith('.mp3')) {
+          // This is a flat file (old structure)
+          await this.syncFlatFile(filePath, file);
+        }
+      }
+      
+      // Save the synchronized status
+      this.debouncedSave();
+    } catch (error) {
+      console.error('Failed to sync with disk files:', error);
+    }
+  }
+  
+  private async syncHierarchicalDirectory(dirPath: string, dirName: string): Promise<void> {
+    try {
+      // Extract surah number from directory name (e.g., "Surah1")
+      const surahNumber = parseInt(dirName.replace('Surah', ''), 10);
+      if (isNaN(surahNumber)) return;
+      
+      const subFiles = await FileSystem.readDirectoryAsync(dirPath);
+      
+      for (const subFile of subFiles) {
+        const subPath = `${dirPath}/${subFile}`;
+        const subInfo = await FileSystem.getInfoAsync(subPath);
+        
+        if (subInfo.exists && subInfo.isDirectory) {
+          // This is a language directory (arabic or english)
+          const type = subFile as 'arabic' | 'english';
+          if (type === 'arabic' || type === 'english') {
+            await this.syncLanguageDirectory(subPath, surahNumber, type);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to sync directory ${dirName}:`, error);
+    }
+  }
+  
+  private async syncLanguageDirectory(langPath: string, surahNumber: number, type: 'arabic' | 'english'): Promise<void> {
+    try {
+      const audioFiles = await FileSystem.readDirectoryAsync(langPath);
+      
+      for (const audioFile of audioFiles) {
+        if (audioFile.endsWith('.mp3')) {
+          const ayahNumber = parseInt(audioFile.replace('.mp3', ''), 10);
+          if (!isNaN(ayahNumber)) {
+            const filePath = `${langPath}/${audioFile}`;
+            const fileInfo = await FileSystem.getInfoAsync(filePath);
+            
+            if (fileInfo.exists && fileInfo.size && fileInfo.size > 1000) {
+              const key = this.getAudioKey(surahNumber, ayahNumber, type);
+              this.statusCache[key] = {
+                downloaded: true,
+                progress: 1,
+                filePath,
+                lastUpdated: Date.now()
+              };
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to sync language directory for surah ${surahNumber}:`, error);
+    }
+  }
+  
+  private async syncFlatFile(filePath: string, fileName: string): Promise<void> {
+    try {
+      // Parse old format: {surahNumber}_{ayahNumber}_{type}.mp3
+      const parts = fileName.replace('.mp3', '').split('_');
+      if (parts.length === 3) {
+        const surahNumber = parseInt(parts[0], 10);
+        const ayahNumber = parseInt(parts[1], 10);
+        const type = parts[2] as 'arabic' | 'english';
+        
+        if (!isNaN(surahNumber) && !isNaN(ayahNumber) && (type === 'arabic' || type === 'english')) {
+          const fileInfo = await FileSystem.getInfoAsync(filePath);
+          if (fileInfo.exists && fileInfo.size && fileInfo.size > 1000) {
+            const key = this.getAudioKey(surahNumber, ayahNumber, type);
+            this.statusCache[key] = {
+              downloaded: true,
+              progress: 1,
+              filePath,
+              lastUpdated: Date.now()
+            };
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to sync flat file ${fileName}:`, error);
     }
   }
 
@@ -292,6 +408,17 @@ class DownloadManager {
   async getDownloadStatus(surahNumber: number, ayahNumber: number, type: 'arabic' | 'english'): Promise<number> {
     const key = this.getAudioKey(surahNumber, ayahNumber, type);
     return this.statusCache[key]?.progress ?? 0;
+  }
+
+  getStorageLocation(): string {
+    if (Platform.OS === 'android') {
+      // Return the user-facing path for Android
+      // externalDirectory typically maps to /storage/emulated/0/Android/data/com.hasnadeeb.ayahflow/files/
+      return `${FileSystem.externalDirectory}AyatFlow/quran-audio/`;
+    } else {
+      // For iOS, return the app documents directory path
+      return this.audioDir;
+    }
   }
 
   async getSurahDownloadProgress(surahNumber: number, totalAyats: number): Promise<number> {
