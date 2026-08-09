@@ -1,12 +1,14 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
   DimensionValue,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -33,6 +35,7 @@ type Props = {
   onBookmark: () => void;
   onToggleAudio: (stage: "arabic" | "english") => void;
   onOpenDownloadManager: () => void;
+  onJumpToAyah: (index: number) => void;
 };
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
@@ -87,6 +90,7 @@ const FlowScreen = React.memo(function FlowScreen({
   onBookmark,
   onToggleAudio,
   onOpenDownloadManager,
+  onJumpToAyah,
 }: Props) {
   const insets = useSafeAreaInsets();
   const styles = useThemedStyles(createStyles);
@@ -95,6 +99,15 @@ const FlowScreen = React.memo(function FlowScreen({
   const arabicGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 7] });
   const englishGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 6] });
   const dotOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1] });
+
+  const [jumpVisible, setJumpVisible] = useState(false);
+  const [jumpText, setJumpText] = useState("");
+  const cardScrollRef = useRef<ScrollView>(null);
+
+  // Reset the card scroll position when the ayah changes (prev/next/jump).
+  useEffect(() => {
+    cardScrollRef.current?.scrollTo({ y: 0, animated: false });
+  }, [index]);
 
   const isBookmarked = bookmarks.includes(`${surah.number}:${currentAyah.numberInSurah}`);
   const progress = `${((index + 1) / ayahs.length) * 100}%` as DimensionValue;
@@ -105,6 +118,21 @@ const FlowScreen = React.memo(function FlowScreen({
       : stage === "english"
         ? { text: "English meaning", color: c.accent2 }
         : { text: "Tap play to begin", color: c.muted };
+
+  const jumpNumber = parseInt(jumpText, 10);
+  const canJump = Number.isInteger(jumpNumber) && jumpNumber >= 1 && jumpNumber <= ayahs.length;
+
+  function openJump() {
+    setJumpText(String(index + 1));
+    setJumpVisible(true);
+  }
+
+  function handleJump() {
+    if (!canJump) return;
+    onJumpToAyah(jumpNumber - 1);
+    setJumpVisible(false);
+    setJumpText("");
+  }
 
   return (
     <View style={styles.screen}>
@@ -117,9 +145,11 @@ const FlowScreen = React.memo(function FlowScreen({
             <Text style={styles.surahName} numberOfLines={1}>
               {surah.englishName}
             </Text>
-            <Text style={styles.progressLabel}>
-              Ayat {index + 1} of {ayahs.length}
-            </Text>
+            <Pressable onPress={openJump} hitSlop={6} accessibilityLabel="Go to ayat">
+              <Text style={styles.progressLabel}>
+                Ayat {index + 1} of {ayahs.length} ⌄
+              </Text>
+            </Pressable>
           </View>
           <View style={styles.headerRight}>
             {downloading && (
@@ -144,10 +174,9 @@ const FlowScreen = React.memo(function FlowScreen({
         </View>
       </View>
 
-      <ScrollView
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
+      {/* Fixed-height card: the text scrolls inside, so the controls below
+          never move regardless of how long the ayah is. */}
+      <View style={styles.cardWrap}>
         <View style={[styles.card, stage !== "idle" && styles.cardActive]}>
           <View style={styles.cardTop}>
             <View style={styles.ayatPill}>
@@ -179,35 +208,44 @@ const FlowScreen = React.memo(function FlowScreen({
             </View>
           </View>
 
-          <Animated.Text
-            selectable
-            style={[
-              styles.arabic,
-              {
-                textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
-                textShadowRadius: arabicGlow,
-              },
-            ]}
+          <ScrollView
+            ref={cardScrollRef}
+            style={styles.cardScroll}
+            contentContainerStyle={styles.cardScrollContent}
+            showsVerticalScrollIndicator={false}
           >
-            {currentAyah.text}
-          </Animated.Text>
+            <Animated.Text
+              selectable
+              style={[
+                styles.arabic,
+                {
+                  textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
+                  textShadowRadius: arabicGlow,
+                },
+              ]}
+            >
+              {currentAyah.text}
+            </Animated.Text>
 
-          <View style={styles.divider} />
+            <View style={styles.divider} />
 
-          <Animated.Text
-            selectable
-            style={[
-              styles.translation,
-              {
-                textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
-                textShadowRadius: englishGlow,
-              },
-            ]}
-          >
-            {currentAyah.translation}
-          </Animated.Text>
+            <Animated.Text
+              selectable
+              style={[
+                styles.translation,
+                {
+                  textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
+                  textShadowRadius: englishGlow,
+                },
+              ]}
+            >
+              {currentAyah.translation}
+            </Animated.Text>
+          </ScrollView>
         </View>
+      </View>
 
+      <View style={styles.footer}>
         <View style={styles.controls}>
           <Pressable style={styles.secondaryBtn} onPress={onPrevious} hitSlop={6} accessibilityLabel="Previous ayat">
             <Text style={styles.secondaryGlyph}>‹</Text>
@@ -253,7 +291,48 @@ const FlowScreen = React.memo(function FlowScreen({
           Uthmani script · Mishary Alafasy recitation{"\n"}
           Saheeh International · English: Ibrahim Walk
         </Text>
-      </ScrollView>
+      </View>
+
+      <Modal
+        transparent
+        visible={jumpVisible}
+        animationType="fade"
+        onRequestClose={() => setJumpVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Go to ayat</Text>
+            <TextInput
+              style={styles.modalInput}
+              keyboardType="number-pad"
+              value={jumpText}
+              onChangeText={(t) => setJumpText(t.replace(/[^0-9]/g, ""))}
+              placeholder={`1 – ${ayahs.length}`}
+              placeholderTextColor={c.muted}
+              autoFocus
+              maxLength={4}
+              onSubmitEditing={handleJump}
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                style={styles.modalCancel}
+                onPress={() => setJumpVisible(false)}
+                hitSlop={6}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalGo, !canJump && styles.modalGoDisabled]}
+                onPress={handleJump}
+                disabled={!canJump}
+                hitSlop={6}
+              >
+                <Text style={styles.modalGoText}>Jump</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 });
@@ -339,18 +418,25 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       height: 3,
       backgroundColor: c.accent,
     },
-    content: {
+    cardWrap: {
+      flex: 1,
+      minHeight: 0,
       padding: 24,
-      paddingBottom: 48,
     },
     card: {
-      marginTop: 24,
+      flex: 1,
       borderRadius: radii.card,
       backgroundColor: c.surface,
       padding: 28,
       borderWidth: 1,
       borderColor: c.line,
       ...t.shadow,
+    },
+    cardScroll: {
+      flex: 1,
+    },
+    cardScrollContent: {
+      paddingBottom: 4,
     },
     cardActive: {
       borderColor: c.accentBorder,
@@ -437,7 +523,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       borderColor: c.line,
       padding: 4,
       gap: 2,
-      marginTop: 24,
+      marginTop: 20,
     },
     speedItem: {
       paddingHorizontal: 13,
@@ -455,17 +541,21 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     speedTextActive: {
       color: c.bg,
     },
+    footer: {
+      paddingHorizontal: 24,
+      paddingBottom: 20,
+    },
     controls: {
-      marginTop: 32,
+      marginTop: 20,
       flexDirection: "row",
       justifyContent: "center",
       alignItems: "center",
-      gap: 20,
+      gap: 14,
     },
     secondaryBtn: {
-      width: 52,
-      height: 52,
-      borderRadius: 26,
+      width: 48,
+      height: 48,
+      borderRadius: 24,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.line,
@@ -473,14 +563,14 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignItems: "center",
     },
     secondaryGlyph: {
-      fontSize: 30,
+      fontSize: 28,
       color: c.ink,
       marginTop: -3,
     },
     primaryBtn: {
-      width: 74,
-      height: 74,
-      borderRadius: 37,
+      width: 68,
+      height: 68,
+      borderRadius: 34,
       backgroundColor: c.accent,
       justifyContent: "center",
       alignItems: "center",
@@ -488,13 +578,13 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     },
     primaryGlyph: {
       color: c.onAccent,
-      fontSize: 26,
+      fontSize: 24,
     },
     repeatBtn: {
       alignSelf: "center",
       paddingHorizontal: 16,
       paddingVertical: 10,
-      marginTop: 24,
+      marginTop: 18,
     },
     repeatText: {
       color: c.inkSoft,
@@ -509,7 +599,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignItems: "center",
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: c.line,
-      marginTop: 24,
+      marginTop: 20,
     },
     downloadBtnText: {
       fontSize: 14,
@@ -521,7 +611,73 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.muted,
       fontSize: 11,
       lineHeight: 17,
-      marginTop: 26,
+      marginTop: 20,
+    },
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: c.overlay,
+      justifyContent: "center",
+      padding: 32,
+    },
+    modalCard: {
+      backgroundColor: c.surface,
+      borderRadius: radii.card,
+      padding: 24,
+      borderWidth: 1,
+      borderColor: c.line,
+    },
+    modalTitle: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.ink,
+      marginBottom: 16,
+      textAlign: "center",
+    },
+    modalInput: {
+      backgroundColor: c.well,
+      borderRadius: radii.control,
+      height: 52,
+      fontSize: 20,
+      fontWeight: "700",
+      color: c.ink,
+      textAlign: "center",
+      borderWidth: 1,
+      borderColor: c.line,
+      paddingHorizontal: 16,
+    },
+    modalActions: {
+      flexDirection: "row",
+      gap: 12,
+      marginTop: 18,
+    },
+    modalCancel: {
+      flex: 1,
+      alignItems: "center",
+      paddingVertical: 13,
+      borderRadius: radii.control,
+      backgroundColor: c.well,
+      borderWidth: 1,
+      borderColor: c.line,
+    },
+    modalCancelText: {
+      color: c.inkSoft,
+      fontSize: 15,
+      fontWeight: "600",
+    },
+    modalGo: {
+      flex: 1,
+      alignItems: "center",
+      paddingVertical: 13,
+      borderRadius: radii.control,
+      backgroundColor: c.accent,
+    },
+    modalGoDisabled: {
+      opacity: 0.4,
+    },
+    modalGoText: {
+      color: c.onAccent,
+      fontSize: 15,
+      fontWeight: "700",
     },
   });
 }

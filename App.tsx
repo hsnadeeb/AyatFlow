@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  BackHandler,
   Platform,
   StyleSheet,
   Text,
@@ -16,8 +17,11 @@ import {
 } from "expo-audio";
 import { getSurah, getSurahs, Ayah, Surah } from "./src/api";
 import {
-  getBookmarks,
-  toggleBookmark,
+  getAyahBookmarks,
+  getSurahBookmarks,
+  migrateLegacyBookmarks,
+  toggleAyahBookmark,
+  toggleSurahBookmark,
 } from "./src/storage";
 import HomeScreen from "./src/components/HomeScreen";
 import FlowScreen from "./src/components/FlowScreen";
@@ -25,6 +29,7 @@ import DownloadManager from "./src/components/DownloadManager";
 import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
+import { scheduleBackupSave, saveBackup, syncBackup } from "./src/backup";
 import { ThemeProvider, useTheme } from "./src/theme";
 import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetManager";
 import { playbackController } from "./src/playback/playbackController";
@@ -54,6 +59,7 @@ function AppInner() {
   const [surahs, setSurahs] = useState<Surah[]>([]);
   const [loading, setLoading] = useState(true);
   const [bookmarks, setBookmarks] = useState<string[]>([]);
+  const [surahBookmarks, setSurahBookmarks] = useState<number[]>([]);
   const [downloadManagerVisible, setDownloadManagerVisible] = useState(false);
   const [downloadManagerSurah, setDownloadManagerSurah] = useState<Surah | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -103,6 +109,7 @@ function AppInner() {
       setAudioPrefs(state.audioPrefs);
       setLast(state.last);
       setProgress(state.progress);
+      scheduleBackupSave();
     });
     return unsubscribe;
   }, []);
@@ -110,12 +117,20 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        const [loadedSurahs, savedBookmarks] = await Promise.all([
+        // Upgrade the old single bookmark list, then sync with the shared
+        // storage backup (restore on fresh install / refresh otherwise).
+        // Must run before ensureInitialized so restored progress/prefs are read.
+        await migrateLegacyBookmarks();
+        await syncBackup();
+
+        const [loadedSurahs, savedBookmarks, savedSurahBookmarks] = await Promise.all([
           getSurahs(),
-          getBookmarks(),
+          getAyahBookmarks(),
+          getSurahBookmarks(),
         ]);
         setSurahs(loadedSurahs);
         setBookmarks(savedBookmarks);
+        setSurahBookmarks(savedSurahBookmarks);
 
         playbackController.alertHandler = (title, message) => {
           Alert.alert(title, message);
@@ -224,8 +239,15 @@ function AppInner() {
     const ayah = data?.ayahs[index];
     if (!data || !ayah) return;
     const key = `${data.surah.number}:${ayah.numberInSurah}`;
-    const next = await toggleBookmark(key);
+    const next = await toggleAyahBookmark(key);
     setBookmarks(next);
+    saveBackup();
+  }
+
+  async function toggleSurahBookmarkHandler(number: number) {
+    const next = await toggleSurahBookmark(number);
+    setSurahBookmarks(next);
+    saveBackup();
   }
 
   async function openSurah(number: number, resumeIndex = 0) {
@@ -287,6 +309,32 @@ function AppInner() {
     setScreen("home");
   }, []);
 
+  // Android hardware back button: navigate between screens instead of
+  // exiting the app (flow -> home -> exit, sub-screens -> home).
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (screen === "flow") {
+        if (downloadManagerVisible) {
+          closeDownloadManager();
+          return true;
+        }
+        onBack();
+        return true;
+      }
+      if (screen === "settings" || screen === "bookmarks") {
+        onCloseSubScreen();
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, downloadManagerVisible]);
+
+  const onJumpToAyah = useCallback((index: number) => {
+    playbackController.jumpTo(index);
+  }, []);
+
   const onTogglePlay = useCallback(() => {
     if (playingRef.current) playbackController.stopAll();
     else playbackController.startFlow();
@@ -310,6 +358,21 @@ function AppInner() {
 
   const onBookmark = useCallback(() => {
     bookmarkCurrent();
+  }, []);
+
+  const onToggleSurahBookmark = useCallback(
+    (number: number) => {
+      toggleSurahBookmarkHandler(number);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  const onRemoveAyahBookmark = useCallback((key: string) => {
+    toggleAyahBookmark(key).then((next) => {
+      setBookmarks(next);
+      saveBackup();
+    });
   }, []);
 
   const onToggleAudio = useCallback((s: "arabic" | "english") => {
@@ -356,10 +419,12 @@ function AppInner() {
             last={last}
             progress={progress}
             downloadingSurahs={downloadingSurahs}
-            bookmarksCount={bookmarks.length}
+            surahBookmarks={surahBookmarks}
+            bookmarksCount={bookmarks.length + surahBookmarks.length}
             onOpenSurah={openSurahHandler}
             onOpenSettings={onOpenSettings}
             onOpenBookmarks={onOpenBookmarks}
+            onToggleSurahBookmark={onToggleSurahBookmark}
             onWidgetPress={() => last && openSurahHandler(last.surah, last.ayahIndex)}
           />
           {loading && (
@@ -404,9 +469,12 @@ function AppInner() {
         >
           <StatusBar style={isDark ? "light" : "dark"} />
           <BookmarksScreen
-            bookmarks={bookmarks}
+            surahBookmarks={surahBookmarks}
+            ayahBookmarks={bookmarks}
             surahs={surahs}
             onOpenSurah={openSurahHandler}
+            onToggleSurahBookmark={onToggleSurahBookmark}
+            onRemoveAyahBookmark={onRemoveAyahBookmark}
             onClose={onCloseSubScreen}
           />
         </SafeAreaView>
@@ -443,6 +511,7 @@ function AppInner() {
           onBookmark={onBookmark}
           onToggleAudio={onToggleAudio}
           onOpenDownloadManager={onOpenFlowDownloadManager}
+          onJumpToAyah={onJumpToAyah}
         />
         <DownloadManager
           visible={downloadManagerVisible}

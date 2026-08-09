@@ -1,0 +1,28 @@
+import { NativeModules, PermissionsAndroid, Platform } from "react-native";
+
+/**
+ * Bridge to the native AyahPersistenceModule (Android only). Backs up app
+ * data and mirrors audio downloads into shared storage
+ * (/storage/emulated/0/Download/AyatFlow/) so they survive app uninstall.
+ * On iOS this is null: the app sandbox has no shared folder without cloud.
+ */
+export const sharedStorage =
+  Platform.OS === "android" ? NativeModules.AyahPersistenceModule : null;
+
+/**
+ * Android 9 and below need a runtime grant to touch the public Downloads
+ * directory. Android 10+ (MediaStore path) needs nothing.
+ */
+export async function ensureSharedStoragePermission(): Promise<boolean> {
+  if (!sharedStorage) return false;
+  const sdk = Number(Platform.Version ?? 99);
+  if (sdk >= 29) return true;
+  try {
+    const granted = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
+    );
+    return granted === PermissionsAndroid.RESULTS.GRANTED;
+  } catch {
+    return false;
+  }
+}

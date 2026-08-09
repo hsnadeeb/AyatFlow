@@ -18,10 +18,12 @@ type Props = {
   last: { surah: number; ayahIndex: number } | null;
   progress: Record<number, number>;
   downloadingSurahs: Set<number>;
+  surahBookmarks: number[];
   bookmarksCount: number;
   onOpenSurah: (number: number, resumeIndex?: number) => void;
   onOpenSettings: () => void;
   onOpenBookmarks: () => void;
+  onToggleSurahBookmark: (number: number) => void;
   onWidgetPress?: () => void;
 };
 
@@ -31,14 +33,18 @@ type RowProps = {
   item: Surah;
   heard: number | undefined;
   downloading: boolean;
+  bookmarked: boolean;
   onOpen: (number: number, resumeIndex?: number) => void;
+  onToggleBookmark: () => void;
 };
 
 const SurahRow = React.memo(function SurahRow({
   item,
   heard,
   downloading,
+  bookmarked,
   onOpen,
+  onToggleBookmark,
 }: RowProps) {
   const styles = useThemedStyles(createStyles);
 
@@ -68,6 +74,15 @@ const SurahRow = React.memo(function SurahRow({
           </Text>
         </View>
         <Text style={styles.rowArabic}>{item.name}</Text>
+        <Pressable
+          onPress={onToggleBookmark}
+          hitSlop={8}
+          accessibilityLabel={bookmarked ? "Remove surah bookmark" : "Bookmark surah"}
+        >
+          <Text style={[styles.rowStar, bookmarked && styles.rowStarActive]}>
+            {bookmarked ? "★" : "☆"}
+          </Text>
+        </Pressable>
       </Pressable>
       {heard !== undefined && (
         <View style={styles.rowTrack}>
@@ -83,15 +98,19 @@ export default function HomeScreen({
   last,
   progress,
   downloadingSurahs,
+  surahBookmarks,
   bookmarksCount,
   onOpenSurah,
   onOpenSettings,
   onOpenBookmarks,
+  onToggleSurahBookmark,
   onWidgetPress,
 }: Props) {
   const styles = useThemedStyles(createStyles);
   const { palette: c, isDark } = useTheme();
   const [query, setQuery] = React.useState("");
+
+  const surahBookmarkSet = useMemo(() => new Set(surahBookmarks), [surahBookmarks]);
 
   const resumeSurah = last ? surahs.find((s) => s.number === last.surah) : undefined;
   const resumeTotal = resumeSurah?.numberOfAyahs ?? 0;
@@ -117,10 +136,12 @@ export default function HomeScreen({
         item={item}
         heard={progress[item.number]}
         downloading={downloadingSurahs.has(item.number)}
+        bookmarked={surahBookmarkSet.has(item.number)}
         onOpen={onOpenSurah}
+        onToggleBookmark={() => onToggleSurahBookmark(item.number)}
       />
     ),
-    [progress, downloadingSurahs, onOpenSurah]
+    [progress, downloadingSurahs, surahBookmarkSet, onOpenSurah, onToggleSurahBookmark]
   );
 
   const header = (
@@ -486,6 +507,15 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       fontSize: 19,
       color: c.inkSoft,
       marginLeft: 10,
+    },
+    rowStar: {
+      fontSize: 18,
+      color: c.muted,
+      marginLeft: 12,
+      paddingHorizontal: 2,
+    },
+    rowStarActive: {
+      color: c.accent,
     },
     downloadBtn: {
       width: 32,

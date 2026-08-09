@@ -596,6 +596,19 @@ class PlaybackController {
     this.savePosition();
   }
 
+  /**
+   * Jump to a specific ayah (0-based index). Stops playback and saves
+   * the position so it survives restarts and widget resumption.
+   */
+  jumpTo(index: number) {
+    const data = this.state.flow;
+    if (!data) return;
+    const clamped = Math.max(0, Math.min(index, data.ayahs.length - 1));
+    this.stopAll();
+    this.state.index = clamped;
+    this.savePosition();
+  }
+
   repeat() {
     this.stopAll();
     setTimeout(() => {

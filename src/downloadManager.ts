@@ -1,7 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import * as MediaLibrary from 'expo-media-library';
 import { Platform } from 'react-native';
+import { sharedStorage, ensureSharedStoragePermission } from './sharedStorage';
 
 const AUDIO_DIRECTORY = 'AyatFlow/quran-audio';
 const DOWNLOAD_STATUS_KEY = 'ayah-flow:download-status';
@@ -35,12 +35,11 @@ class DownloadManager {
 
   private getAudioDirectory(): string {
     if (Platform.OS === 'android') {
-      // Use external storage for Android
-      // externalDirectory typically maps to /storage/emulated/0/Android/data/com.hasnadeeb.ayahflow/files/
-      // This persists across app updates but may be removed on complete uninstall
-      // For true persistence across reinstalls, we would need to use MediaStore API
-      // However, for now this provides the best balance of functionality and user experience
-      return `${FileSystem.externalDirectory}${AUDIO_DIRECTORY}/`;
+      // Internal app storage holds the working copies used for playback.
+      // Completed downloads are ALSO mirrored to shared storage
+      // (/storage/emulated/0/Download/AyatFlow/quran-audio/) so they survive
+      // app uninstall/reinstall and get restored on next launch.
+      return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
     } else {
       // iOS app group directory or documents directory
       return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
@@ -413,8 +412,8 @@ class DownloadManager {
   getStorageLocation(): string {
     if (Platform.OS === 'android') {
       // Return the user-facing path for Android
-      // externalDirectory typically maps to /storage/emulated/0/Android/data/com.hasnadeeb.ayahflow/files/
-      return `${FileSystem.externalDirectory}AyatFlow/quran-audio/`;
+      // documentDirectory maps to the app's internal storage directory
+      return `${FileSystem.documentDirectory}AyatFlow/quran-audio/`;
     } else {
       // For iOS, return the app documents directory path
       return this.audioDir;
