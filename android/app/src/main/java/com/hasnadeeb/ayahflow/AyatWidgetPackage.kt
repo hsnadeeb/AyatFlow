@@ -8,7 +8,10 @@ import com.facebook.react.uimanager.ViewManager
 class AyatWidgetPackage : ReactPackage {
     
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
-        return listOf(AyatWidgetModule(reactContext))
+        return listOf(
+            AyatWidgetModule(reactContext),
+            AyahPersistenceModule(reactContext)
+        )
     }
     
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
