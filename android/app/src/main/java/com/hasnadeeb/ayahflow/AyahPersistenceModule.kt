@@ -141,7 +141,9 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
      * /storage/emulated/0/AyatFlow/
      */
     private val backupRelativePath = "AyatFlow/"
-    private val dataRelativeRoot = "AyatFlow/data/"
+    // JS passes the "data" subfolder as relativeDir, so the data root is just
+    // "AyatFlow/" — concatenating it with relativeDir yields "AyatFlow/data/".
+    private val dataRelativeRoot = "AyatFlow/"
     private val audioRelativeRoot = "AyatFlow/quran-audio/"
     private val tafsirRelativeRoot = "AyatFlow/tafsir/"
 
@@ -597,7 +599,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                                 ?: continue
 
                         result.pushString(
-                            "${rel.removePrefix(audioRelativeRoot)}$name"
+                            "quran-audio/${rel.removePrefix(audioRelativeRoot)}$name"
                         )
                     }
                 }
@@ -1254,6 +1256,166 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                     "quran-audio/$rel"
                 )
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // SAF helpers — operate on the folder the user granted via the system
+    // folder picker. DocumentFile descends into subfolders correctly, which
+    // expo's JS SAF layer cannot do, so all folder-backed mirror/restore
+    // goes through these methods.
+    // ---------------------------------------------------------------------
+
+    private fun safTreeRoot(treeUri: String): DocumentFile? =
+        runCatching { DocumentFile.fromTreeUri(appContext, Uri.parse(treeUri)) }.getOrNull()
+
+    private fun safResolve(treeUri: String, relativePath: String): DocumentFile? {
+        val root = safTreeRoot(treeUri) ?: return null
+        var current = root
+        for (segment in relativePath.split("/")) {
+            if (segment.isBlank()) continue
+            current = current.findFile(segment) ?: return null
+        }
+        return current
+    }
+
+    private fun mimeFor(name: String): String = when {
+        name.endsWith(".mp3") -> "audio/mpeg"
+        name.endsWith(".json") -> "application/json"
+        else -> "application/octet-stream"
+    }
+
+    /** Find `relativePath` inside the granted folder, creating missing dirs/files. */
+    private fun safEnsureFile(treeUri: String, relativePath: String): DocumentFile? {
+        val root = safTreeRoot(treeUri) ?: return null
+        var current = root
+        val segments = relativePath.split("/").filter { it.isNotBlank() }
+        for (i in segments.indices) {
+            val segment = segments[i]
+            val isLast = i == segments.lastIndex
+            var child = current.findFile(segment)
+            if (child == null) {
+                child = if (isLast) {
+                    current.createFile(mimeFor(segment), segment)
+                } else {
+                    current.createDirectory(segment)
+                } ?: return null
+            }
+            current = child
+        }
+        return current
+    }
+
+    @ReactMethod
+    fun safWriteTextFile(treeUri: String, relativePath: String, content: String, promise: Promise) {
+        try {
+            val file = safEnsureFile(treeUri, relativePath)
+            if (file == null) {
+                promise.resolve(false)
+                return
+            }
+            appContext.contentResolver.openOutputStream(file.uri, "wt")?.use { output ->
+                output.write(content.toByteArray(Charsets.UTF_8))
+            } ?: throw IOException("Failed to open $relativePath for writing")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SAF_WRITE_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun safReadTextFile(treeUri: String, relativePath: String, promise: Promise) {
+        try {
+            val file = safResolve(treeUri, relativePath)
+            if (file == null || !file.isFile) {
+                promise.resolve(null)
+                return
+            }
+            val text = appContext.contentResolver.openInputStream(file.uri)?.use { input ->
+                input.readBytes().toString(Charsets.UTF_8)
+            }
+            promise.resolve(text)
+        } catch (e: Exception) {
+            promise.reject("SAF_READ_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun safListFiles(treeUri: String, relativePath: String, promise: Promise) {
+        try {
+            val root = safResolve(treeUri, relativePath) ?: safTreeRoot(treeUri)
+            val result = Arguments.createArray()
+            if (root != null && root.isDirectory) {
+                collectSafFiles(root, relativePath.trimEnd('/'), result)
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("SAF_LIST_FAILED", e.message, e)
+        }
+    }
+
+    private fun collectSafFiles(dir: DocumentFile, prefix: String, out: WritableArray) {
+        for (child in dir.listFiles()) {
+            val name = child.name ?: continue
+            val rel = if (prefix.isEmpty()) name else "$prefix/$name"
+            if (child.isDirectory) {
+                collectSafFiles(child, rel, out)
+            } else {
+                out.pushString(rel)
+            }
+        }
+    }
+
+    @ReactMethod
+    fun safDeleteFile(treeUri: String, relativePath: String, promise: Promise) {
+        try {
+            safResolve(treeUri, relativePath)?.delete()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SAF_DELETE_FAILED", e.message, e)
+        }
+    }
+
+    /** Copy a file from the granted folder back into app storage (audio restore). */
+    @ReactMethod
+    fun safCopyFileToApp(treeUri: String, relativePath: String, destPath: String, promise: Promise) {
+        try {
+            val file = safResolve(treeUri, relativePath)
+            if (file == null || !file.isFile) {
+                promise.resolve(false)
+                return
+            }
+            val dest = resolveSourceFile(destPath)
+            dest.parentFile?.mkdirs()
+            appContext.contentResolver.openInputStream(file.uri)?.use { input ->
+                dest.writeBytes(input.readBytes())
+            } ?: throw IOException("Failed to read $relativePath")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SAF_COPY_FAILED", e.message, e)
+        }
+    }
+
+    /** Copy an app file into the granted folder (audio mirror on download). */
+    @ReactMethod
+    fun safCopyFileFromApp(treeUri: String, relativePath: String, sourcePath: String, promise: Promise) {
+        try {
+            val source = resolveSourceFile(sourcePath)
+            if (!source.exists() || source.length() == 0L) {
+                promise.resolve(false)
+                return
+            }
+            val file = safEnsureFile(treeUri, relativePath)
+            if (file == null) {
+                promise.resolve(false)
+                return
+            }
+            appContext.contentResolver.openOutputStream(file.uri, "wt")?.use { output ->
+                output.write(source.readBytes())
+            } ?: throw IOException("Failed to open $relativePath for writing")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SAF_COPY_FAILED", e.message, e)
         }
     }
 

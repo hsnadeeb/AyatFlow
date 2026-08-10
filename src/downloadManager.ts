@@ -2,6 +2,13 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { NativeModules, Platform } from 'react-native';
 import { sharedStorage, ensureSharedStoragePermission } from './sharedStorage';
+import {
+  getBackupFolderUri,
+  listAudioViaSaf,
+  restoreAudioViaSaf,
+  saveAudioViaSaf,
+  deleteAudioViaSaf,
+} from './backup';
 
 const AUDIO_DIRECTORY = 'AyatFlow/quran-audio';
 const DOWNLOAD_STATUS_KEY = 'download-status.json';
@@ -416,33 +423,62 @@ class DownloadManager {
    * Restore previously downloaded audio from shared storage after a fresh install:
    * any file found in AyatFlow/quran-audio missing from the app's working
    * directory is copied back and marked as downloaded.
+   *
+   * MediaStore files written by a previous install can become unreadable after
+   * uninstall/reinstall on Android 10+, so files are also restored from the
+   * granted backup folder (SAF) when the MediaStore pass finds nothing.
    */
   private async syncWithSharedStorage(): Promise<void> {
-    if (!(await this.hasSharedStoragePermission())) return;
-    try {
-      const files: string[] = await sharedStorage!.listAudioFiles();
-      for (const rel of files) {
-        const match = rel.match(/^quran-audio\/Surah(\d+)\/(arabic|english)\/(\d+)\.mp3$/);
-        if (!match) continue;
-        const surahNumber = parseInt(match[1], 10);
-        const type = match[2] as AudioType;
-        const ayahNumber = parseInt(match[3], 10);
-        const key = this.getAudioKey(surahNumber, ayahNumber, type);
-        if (this.statusCache[key]?.downloaded) continue;
+    if (await this.hasSharedStoragePermission()) {
+      try {
+        const files: string[] = await sharedStorage!.listAudioFiles();
+        for (const rel of files) {
+          const match = rel.match(/^quran-audio\/Surah(\d+)\/(arabic|english)\/(\d+)\.mp3$/);
+          if (!match) continue;
+          const surahNumber = parseInt(match[1], 10);
+          const type = match[2] as AudioType;
+          const ayahNumber = parseInt(match[3], 10);
+          const key = this.getAudioKey(surahNumber, ayahNumber, type);
+          if (this.statusCache[key]?.downloaded) continue;
 
-        const destPath = `${this.audioDir}${this.getFileName(surahNumber, ayahNumber, type)}`;
-        const restored = await sharedStorage!.restoreAudioFile(
-          `Surah${surahNumber}/${type}`,
-          `${ayahNumber}.mp3`,
-          destPath
-        );
+          const destPath = `${this.audioDir}${this.getFileName(surahNumber, ayahNumber, type)}`;
+          const restored = await sharedStorage!.restoreAudioFile(
+            `Surah${surahNumber}/${type}`,
+            `${ayahNumber}.mp3`,
+            destPath
+          );
+          if (restored) {
+            this.statusCache[key] = { downloaded: true, progress: 1, filePath: destPath, lastUpdated: Date.now() };
+          }
+        }
+        this.debouncedSave();
+      } catch (error) {
+        console.error('Failed to sync audio with shared storage:', error);
+      }
+    }
+    await this.syncAudioFromSaf();
+  }
+
+  /** Restore audio from the user-granted backup folder (SAF), which survives reinstalls. */
+  private async syncAudioFromSaf(): Promise<void> {
+    const folder = await getBackupFolderUri();
+    if (!folder) return;
+    try {
+      const files = await listAudioViaSaf(folder);
+      let restoredAny = false;
+      for (const file of files) {
+        const key = this.getAudioKey(file.surahNumber, file.ayahNumber, file.type);
+        if (this.statusCache[key]?.downloaded) continue;
+        const destPath = `${this.audioDir}${this.getFileName(file.surahNumber, file.ayahNumber, file.type)}`;
+        const restored = await restoreAudioViaSaf(folder, file, destPath);
         if (restored) {
           this.statusCache[key] = { downloaded: true, progress: 1, filePath: destPath, lastUpdated: Date.now() };
+          restoredAny = true;
         }
       }
-      this.debouncedSave();
+      if (restoredAny) this.debouncedSave();
     } catch (error) {
-      console.error('Failed to sync audio with shared storage:', error);
+      console.error('Failed to sync audio with backup folder:', error);
     }
   }
 
@@ -452,20 +488,40 @@ class DownloadManager {
     type: AudioType,
     sourcePath: string
   ): Promise<void> {
-    if (!(await this.hasSharedStoragePermission())) return;
+    if (await this.hasSharedStoragePermission()) {
+      try {
+        await sharedStorage!.saveAudioFile(`Surah${surahNumber}/${type}`, `${ayahNumber}.mp3`, sourcePath);
+      } catch (error) {
+        console.warn('Failed to mirror audio to shared storage:', error);
+      }
+    }
+    // Also keep a copy in the granted backup folder — MediaStore files become
+    // unreadable after a reinstall, so this is what actually survives one.
     try {
-      await sharedStorage!.saveAudioFile(`Surah${surahNumber}/${type}`, `${ayahNumber}.mp3`, sourcePath);
+      const folder = await getBackupFolderUri();
+      if (folder) {
+        await saveAudioViaSaf(folder, surahNumber, type, ayahNumber, sourcePath);
+      }
     } catch (error) {
-      console.warn('Failed to mirror audio to shared storage:', error);
+      console.warn('Failed to mirror audio to backup folder:', error);
     }
   }
 
   private async deleteFromSharedStorage(surahNumber: number, ayahNumber: number, type: AudioType): Promise<void> {
-    if (!(await this.hasSharedStoragePermission())) return;
+    if (await this.hasSharedStoragePermission()) {
+      try {
+        await sharedStorage!.deleteAudioFile(`Surah${surahNumber}/${type}`, `${ayahNumber}.mp3`);
+      } catch (error) {
+        console.warn('Failed to delete audio from shared storage:', error);
+      }
+    }
     try {
-      await sharedStorage!.deleteAudioFile(`Surah${surahNumber}/${type}`, `${ayahNumber}.mp3`);
+      const folder = await getBackupFolderUri();
+      if (folder) {
+        await deleteAudioViaSaf(folder, surahNumber, type, ayahNumber);
+      }
     } catch (error) {
-      console.warn('Failed to delete audio from shared storage:', error);
+      console.warn('Failed to delete audio from backup folder:', error);
     }
   }
 
@@ -779,6 +835,17 @@ class DownloadManager {
       return `/storage/emulated/0/AyatFlow/quran-audio/`;
     }
     return this.audioDir;
+  }
+
+  /**
+   * Re-run the shared-storage sync. Called after the user grants the backup
+   * folder (SAF) on a fresh install so audio that survived the reinstall in
+   * that folder gets restored even though it wasn't granted at startup.
+   */
+  async resyncFromSharedStorage(): Promise<void> {
+    await this.whenReady();
+    await this.syncWithSharedStorage();
+    this.emit({ type: 'sync' });
   }
 
   private invalidateSizeCache(): void {

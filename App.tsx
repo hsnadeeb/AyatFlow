@@ -478,6 +478,13 @@ function AppInner() {
     } catch (error) {
       console.error("Failed to refresh restored data:", error);
     }
+
+    // The folder was only granted now, so audio/tafsir couldn't have been
+    // restored at startup — re-run those syncs with SAF access.
+    getDownloadManager().resyncFromSharedStorage().catch((error) => {
+      console.warn("Failed to resync audio from backup folder:", error);
+    });
+    syncTafsirCacheFromShared().catch(() => {});
   }, []);
 
   const openSurahHandler = useCallback(

@@ -95,8 +95,10 @@ async function collectBackupData(): Promise<BackupData> {
 
 // ---------------------------------------------------------------------
 // SAF (Storage Access Framework) helpers — the folder the user granted via
-// the system folder picker. Data files live in a "data" subfolder so the
-// folder structure matches the portable layout.
+// the system folder picker. All operations route through the native module
+// because expo's JS SAF layer cannot list/create files inside subfolders of
+// the granted tree. relativePath is relative to the granted folder, e.g.
+// "data/bookmarks.json" or "quran-audio/Surah1/arabic/1.mp3".
 // ---------------------------------------------------------------------
 
 /**
@@ -112,98 +114,41 @@ export async function saveBackupFolderUri(uri: string): Promise<void> {
   await AsyncStorage.setItem(SAF_FOLDER_KEY, uri);
 }
 
-async function safFileName(uri: string): Promise<string> {
-  const lastSegment = uri.substring(uri.lastIndexOf("/") + 1);
-  try {
-    return decodeURIComponent(lastSegment);
-  } catch {
-    return lastSegment;
-  }
+function safWriteTextFile(folderUri: string, relativePath: string, content: string): Promise<boolean> {
+  return module
+    .safWriteTextFile(folderUri, relativePath, content)
+    .then(() => true)
+    .catch((error: unknown) => {
+      console.warn(`Failed to write ${relativePath} via SAF:`, error);
+      return false;
+    });
 }
 
-async function safDataDirectory(folderUri: string): Promise<string | null> {
+async function safReadTextFile(folderUri: string, relativePath: string): Promise<string | null> {
   try {
-    const entries = await StorageAccessFramework.readDirectoryAsync(folderUri);
-    for (const entry of entries) {
-      if ((await safFileName(entry)) === DATA_SUBDIR) return entry;
-    }
-    return await StorageAccessFramework.makeDirectoryAsync(folderUri, DATA_SUBDIR);
+    return (await module.safReadTextFile(folderUri, relativePath)) as string | null;
   } catch (error) {
-    console.warn("Failed to access SAF data folder:", error);
+    console.warn(`Failed to read ${relativePath} via SAF:`, error);
     return null;
   }
 }
 
-async function readFileViaSaf(dataDirUri: string, dataFileName: string): Promise<string | null> {
+/** All files under the granted folder (relative paths), deepest first. */
+async function safListFiles(folderUri: string, relativePath: string): Promise<string[]> {
   try {
-    const entries = await StorageAccessFramework.readDirectoryAsync(dataDirUri);
-    for (const entry of entries) {
-      if ((await safFileName(entry)) === dataFileName) {
-        return await StorageAccessFramework.readAsStringAsync(entry);
-      }
-    }
+    return (await module.safListFiles(folderUri, relativePath)) as string[];
   } catch (error) {
-    console.warn(`Failed to read ${dataFileName} via SAF:`, error);
-  }
-  return null;
-}
-
-async function writeFileViaSaf(dataDirUri: string, dataFileName: string, content: string): Promise<boolean> {
-  try {
-    const entries = await StorageAccessFramework.readDirectoryAsync(dataDirUri);
-    for (const entry of entries) {
-      if ((await safFileName(entry)) === dataFileName) {
-        await StorageAccessFramework.writeAsStringAsync(entry, content);
-        return true;
-      }
-    }
-    const fileUri = await StorageAccessFramework.createFileAsync(
-      dataDirUri,
-      dataFileName.replace(/\.json$/, ""),
-      "application/json"
-    );
-    await StorageAccessFramework.writeAsStringAsync(fileUri, content);
-    return true;
-  } catch (error) {
-    console.warn(`Failed to write ${dataFileName} via SAF:`, error);
-    return false;
+    console.warn(`Failed to list ${relativePath} via SAF:`, error);
+    return [];
   }
 }
 
-async function readBackupViaSaf(folderUri: string): Promise<string | null> {
-  try {
-    const entries = await StorageAccessFramework.readDirectoryAsync(folderUri);
-    for (const entry of entries) {
-      if ((await safFileName(entry)).endsWith(BACKUP_FILE_NAME)) {
-        return await StorageAccessFramework.readAsStringAsync(entry);
-      }
-    }
-  } catch (error) {
-    console.warn("Failed to read backup via SAF:", error);
-  }
-  return null;
-}
-
-async function writeBackupViaSaf(folderUri: string, data: string): Promise<boolean> {
-  try {
-    const entries = await StorageAccessFramework.readDirectoryAsync(folderUri);
-    for (const entry of entries) {
-      if ((await safFileName(entry)).endsWith(BACKUP_FILE_NAME)) {
-        await StorageAccessFramework.writeAsStringAsync(entry, data);
-        return true;
-      }
-    }
-    const fileUri = await StorageAccessFramework.createFileAsync(
-      folderUri,
-      "ayah-flow-backup",
-      "application/json"
-    );
-    await StorageAccessFramework.writeAsStringAsync(fileUri, data);
-    return true;
-  } catch (error) {
-    console.warn("Failed to write backup via SAF:", error);
-    return false;
-  }
+function safDeleteFile(folderUri: string, relativePath: string): Promise<void> {
+  return module
+    .safDeleteFile(folderUri, relativePath)
+    .catch((error: unknown) => {
+      console.warn(`Failed to delete ${relativePath} via SAF:`, error);
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -242,7 +187,6 @@ async function mirrorDataToShared(): Promise<void> {
   if (changed.length === 0) return;
 
   const folder = await getBackupFolderUri();
-  const safDataDir = folder ? await safDataDirectory(folder) : null;
 
   if (module && (await ensureSharedStoragePermission())) {
     for (const [name, content] of changed) {
@@ -255,9 +199,9 @@ async function mirrorDataToShared(): Promise<void> {
     }
   }
 
-  if (safDataDir) {
+  if (folder) {
     for (const [name, content] of changed) {
-      if (await writeFileViaSaf(safDataDir, name, content)) {
+      if (await safWriteTextFile(folder, `${DATA_SUBDIR}/${name}`, content)) {
         lastMirrored.set(name, content);
       }
     }
@@ -283,13 +227,92 @@ async function readSharedDataFile(dataFileName: string): Promise<string | null> 
   }
   const folder = await getBackupFolderUri();
   if (folder) {
-    const safDataDir = await safDataDirectory(folder);
-    if (safDataDir) {
-      const raw = await readFileViaSaf(safDataDir, dataFileName);
-      if (raw) return raw;
-    }
+    const raw = await safReadTextFile(folder, `${DATA_SUBDIR}/${dataFileName}`);
+    if (raw) return raw;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------
+// SAF audio mirroring — MediaStore files written by a previous install
+// become unreadable after uninstall/reinstall on Android 10+, so audio
+// is ALSO mirrored into the granted backup folder (and restored from it)
+// to survive a reinstall.
+// ---------------------------------------------------------------------
+
+const AUDIO_SUBDIR = "quran-audio";
+
+export type SafAudioFile = {
+  surahNumber: number;
+  type: "arabic" | "english";
+  ayahNumber: number;
+  relativePath: string;
+};
+
+/** Every audio file found in the granted folder's quran-audio/ subfolder. */
+export async function listAudioViaSaf(folderUri: string): Promise<SafAudioFile[]> {
+  const files = await safListFiles(folderUri, AUDIO_SUBDIR);
+  const result: SafAudioFile[] = [];
+  for (const rel of files) {
+    const match = rel.match(/^quran-audio\/Surah(\d+)\/(arabic|english)\/(\d+)\.mp3$/);
+    if (!match) continue;
+    result.push({
+      surahNumber: parseInt(match[1], 10),
+      type: match[2] as SafAudioFile["type"],
+      ayahNumber: parseInt(match[3], 10),
+      relativePath: rel,
+    });
+  }
+  return result;
+}
+
+/** Copy one audio file from the SAF folder back into app storage. */
+export async function restoreAudioViaSaf(
+  folderUri: string,
+  file: SafAudioFile,
+  destPath: string
+): Promise<boolean> {
+  try {
+    return (await module.safCopyFileToApp(folderUri, file.relativePath, destPath)) === true;
+  } catch (error) {
+    console.warn(
+      `Failed to restore audio via SAF: ${file.relativePath}`,
+      error
+    );
+    return false;
+  }
+}
+
+/** Mirror one freshly downloaded audio file into the granted folder. */
+export async function saveAudioViaSaf(
+  folderUri: string,
+  surahNumber: number,
+  type: "arabic" | "english",
+  ayahNumber: number,
+  sourcePath: string
+): Promise<boolean> {
+  try {
+    return (
+      (await module.safCopyFileFromApp(
+        folderUri,
+        `${AUDIO_SUBDIR}/Surah${surahNumber}/${type}/${ayahNumber}.mp3`,
+        sourcePath
+      )) === true
+    );
+  } catch (error) {
+    console.warn(`Failed to mirror audio via SAF: Surah${surahNumber}/${type}/${ayahNumber}.mp3`, error);
+    return false;
+  }
+}
+
+/** Remove one audio file from the granted folder. */
+export async function deleteAudioViaSaf(
+  folderUri: string,
+  surahNumber: number,
+  type: "arabic" | "english",
+  ayahNumber: number
+): Promise<void> {
+  await safDeleteFile(folderUri, `${AUDIO_SUBDIR}/Surah${surahNumber}/${type}/${ayahNumber}.mp3`);
 }
 
 /**
@@ -354,7 +377,7 @@ export async function saveBackup(): Promise<void> {
   }
 
   const folder = await getBackupFolderUri();
-  if (folder && (await writeBackupViaSaf(folder, data))) {
+  if (folder && (await safWriteTextFile(folder, BACKUP_FILE_NAME, data))) {
     wroteAny = true;
   }
 
@@ -447,7 +470,7 @@ export async function syncBackup(): Promise<boolean> {
 
   const folder = await getBackupFolderUri();
   if (folder) {
-    const raw = await readBackupViaSaf(folder);
+    const raw = await safReadTextFile(folder, BACKUP_FILE_NAME);
     if (raw && (await restoreFromRaw(raw))) return true;
   }
 
@@ -464,7 +487,7 @@ export async function restoreBackupFromSafFolder(folderUri: string): Promise<boo
   const restored = await restoreDataFromShared();
   if (restored) return true;
 
-  const raw = await readBackupViaSaf(folderUri);
+  const raw = await safReadTextFile(folderUri, BACKUP_FILE_NAME);
   if (!raw) return false;
   return restoreFromRaw(raw);
 }

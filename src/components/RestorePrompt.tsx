@@ -51,9 +51,11 @@ export default function RestorePrompt({ visible, onDismiss, onRestored }: Props)
       }
       const restored = await restoreBackupFromSafFolder(folder);
       markRestorePrompted();
+      // Even when no data backup is found, the folder grant enables the audio
+      // and tafsir restore, so always refresh.
+      onRestored();
       if (restored) {
         onDismiss();
-        onRestored();
       } else {
         Alert.alert(
           "No backup found",
@@ -75,9 +77,9 @@ export default function RestorePrompt({ visible, onDismiss, onRestored }: Props)
           <Text style={styles.emoji}>📖</Text>
           <Text style={styles.title}>Restore your bookmarks?</Text>
           <Text style={styles.body}>
-            It looks like Ayat Flow was reinstalled. To bring back your bookmarks and reading
-            progress, pick the "AyatFlow" folder in your Downloads folder when the file picker
-            opens.
+            It looks like Ayat Flow was reinstalled. To bring back your bookmarks, downloaded
+            audio, and reading progress, pick the "AyatFlow" folder when the file picker opens.
+            It's at the top level of your internal storage — not inside Downloads.
           </Text>
           <Text style={styles.hint}>
             If this is your first time using the app, tap Skip.
