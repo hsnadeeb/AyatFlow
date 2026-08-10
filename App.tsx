@@ -27,7 +27,7 @@ import {
 } from "./src/storage";
 import HomeScreen from "./src/components/HomeScreen";
 import FlowScreen from "./src/components/FlowScreen";
-import DownloadManager from "./src/components/DownloadManager";
+import DownloadManager from "./src/components/DownloadManagerModal";
 import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import RestorePrompt from "./src/components/RestorePrompt";

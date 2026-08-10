@@ -12,9 +12,13 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableArray
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URI
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * Persists app data and mirrors audio downloads to shared storage so they
@@ -186,6 +190,46 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
             promise.resolve(result)
         } catch (e: Exception) {
             promise.reject("LIST_AUDIO_FAILED", e.message, e)
+        }
+    }
+
+    /**
+     * Zip a directory of downloaded audio files (SurahN/{arabic,english}/N.mp3)
+     * into a single archive so the whole surah can be shared at once. Streams
+     * from disk — safe for surahs with hundreds of megabytes of audio.
+     */
+    @ReactMethod
+    fun zipAudioFiles(sourceDirPath: String, zipPath: String, promise: Promise) {
+        try {
+            val sourceDir = resolveSourceFile(sourceDirPath)
+            if (!sourceDir.exists() || !sourceDir.isDirectory) {
+                throw IOException("Source directory not found: $sourceDirPath")
+            }
+            val dest = resolveSourceFile(zipPath)
+            dest.parentFile?.mkdirs()
+            if (dest.exists()) dest.delete()
+
+            val base = sourceDir.absolutePath
+            val buffer = ByteArray(64 * 1024)
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(dest))).use { zip ->
+                sourceDir.walkTopDown().forEach { file ->
+                    if (!file.isFile) return@forEach
+                    if (file.name.endsWith(".part") || file.name.endsWith(".tmp")) return@forEach
+                    val relPath = file.absolutePath.removePrefix(base).removePrefix("/")
+                    zip.putNextEntry(ZipEntry(relPath))
+                    file.inputStream().use { input ->
+                        var read = input.read(buffer)
+                        while (read != -1) {
+                            zip.write(buffer, 0, read)
+                            read = input.read(buffer)
+                        }
+                    }
+                    zip.closeEntry()
+                }
+            }
+            promise.resolve(dest.absolutePath)
+        } catch (e: Exception) {
+            promise.reject("ZIP_AUDIO_FAILED", e.message, e)
         }
     }
 

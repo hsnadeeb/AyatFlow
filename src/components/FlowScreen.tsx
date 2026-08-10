@@ -102,11 +102,14 @@ const FlowScreen = React.memo(function FlowScreen({
 
   const [jumpVisible, setJumpVisible] = useState(false);
   const [jumpText, setJumpText] = useState("");
-  const cardScrollRef = useRef<ScrollView>(null);
+  const [moreVisible, setMoreVisible] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
+  const contentScrollRef = useRef<ScrollView>(null);
 
-  // Reset the card scroll position when the ayah changes (prev/next/jump).
+  // Reset the reading scroll position whenever the ayah changes (prev/next/jump).
   useEffect(() => {
-    cardScrollRef.current?.scrollTo({ y: 0, animated: false });
+    contentScrollRef.current?.scrollTo({ y: 0, animated: false });
+    setAtBottom(true);
   }, [index]);
 
   const isBookmarked = bookmarks.includes(`${surah.number}:${currentAyah.numberInSurah}`);
@@ -114,10 +117,10 @@ const FlowScreen = React.memo(function FlowScreen({
 
   const stageStatus =
     stage === "arabic"
-      ? { text: "Arabic recitation", color: c.accent }
+      ? { text: "Reciting", color: c.accent }
       : stage === "english"
-        ? { text: "English meaning", color: c.accent2 }
-        : { text: "Tap play to begin", color: c.muted };
+        ? { text: "Meaning", color: c.accent2 }
+        : { text: "Paused", color: c.muted };
 
   const jumpNumber = parseInt(jumpText, 10);
   const canJump = Number.isInteger(jumpNumber) && jumpNumber >= 1 && jumpNumber <= ayahs.length;
@@ -134,8 +137,16 @@ const FlowScreen = React.memo(function FlowScreen({
     setJumpText("");
   }
 
+  function handleScroll(e: any) {
+    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const distanceFromBottom =
+      contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    setAtBottom(distanceFromBottom < 24);
+  }
+
   return (
     <View style={styles.screen}>
+      {/* ---------- Fixed header ---------- */}
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <View style={styles.headerRow}>
           <Pressable style={styles.iconBtn} onPress={onBack} hitSlop={6} accessibilityLabel="Back">
@@ -174,79 +185,87 @@ const FlowScreen = React.memo(function FlowScreen({
         </View>
       </View>
 
-      {/* Fixed-height card: the text scrolls inside, so the controls below
-          never move regardless of how long the ayah is. */}
-      <View style={styles.cardWrap}>
-        <View style={[styles.card, stage !== "idle" && styles.cardActive]}>
-          <View style={styles.cardTop}>
-            <View style={styles.ayatPill}>
-              <Text style={styles.ayatPillText}>Ayat {currentAyah.numberInSurah}</Text>
-            </View>
-            <View style={styles.cardTopRight}>
-              <AudioToggle
-                icon="♪"
-                label="Recitation audio"
-                value={audioPrefs.arabic}
-                onBg={c.accentSoft}
-                onText={c.accent}
-                onToggle={() => onToggleAudio("arabic")}
-              />
-              <AudioToggle
-                icon="Aa"
-                label="Meaning audio"
-                value={audioPrefs.english}
-                onBg={c.accent2Soft}
-                onText={c.accent2}
-                onToggle={() => onToggleAudio("english")}
-              />
-              <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
-                <Animated.View
-                  style={[styles.stageDot, { opacity: stage === "idle" ? 0.55 : dotOpacity }]}
-                />
-                <Text style={styles.stagePillText}>{stageStatus.text}</Text>
-              </View>
-            </View>
+      {/* ---------- Fixed meta strip: ayat #, audio prefs, live stage ---------- */}
+      <View style={styles.metaBar}>
+        <View style={styles.ayatPill}>
+          <Text style={styles.ayatPillText}>Ayat {currentAyah.numberInSurah}</Text>
+        </View>
+        <View style={styles.metaRight}>
+          <AudioToggle
+            icon="♪"
+            label="Recitation audio"
+            value={audioPrefs.arabic}
+            onBg={c.accentSoft}
+            onText={c.accent}
+            onToggle={() => onToggleAudio("arabic")}
+          />
+          <AudioToggle
+            icon="Aa"
+            label="Meaning audio"
+            value={audioPrefs.english}
+            onBg={c.accent2Soft}
+            onText={c.accent2}
+            onToggle={() => onToggleAudio("english")}
+          />
+          <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
+            <Animated.View
+              style={[styles.stageDot, { opacity: stage === "idle" ? 0.55 : dotOpacity }]}
+            />
+            <Text style={styles.stagePillText}>{stageStatus.text}</Text>
           </View>
-
-          <ScrollView
-            ref={cardScrollRef}
-            style={styles.cardScroll}
-            contentContainerStyle={styles.cardScrollContent}
-            showsVerticalScrollIndicator={false}
-          >
-            <Animated.Text
-              selectable
-              style={[
-                styles.arabic,
-                {
-                  textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
-                  textShadowRadius: arabicGlow,
-                },
-              ]}
-            >
-              {currentAyah.text}
-            </Animated.Text>
-
-            <View style={styles.divider} />
-
-            <Animated.Text
-              selectable
-              style={[
-                styles.translation,
-                {
-                  textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
-                  textShadowRadius: englishGlow,
-                },
-              ]}
-            >
-              {currentAyah.translation}
-            </Animated.Text>
-          </ScrollView>
         </View>
       </View>
 
-      <View style={styles.footer}>
-        <View style={styles.controls}>
+      {/* ---------- The one true scroll region: the ayah itself ---------- */}
+      <View style={styles.readerWrap}>
+        <ScrollView
+          ref={contentScrollRef}
+          style={styles.reader}
+          contentContainerStyle={styles.readerContent}
+          showsVerticalScrollIndicator={false}
+          onScroll={handleScroll}
+          scrollEventThrottle={32}
+        >
+          <Animated.Text
+            selectable
+            style={[
+              styles.arabic,
+              {
+                textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
+                textShadowRadius: arabicGlow,
+              },
+            ]}
+          >
+            {currentAyah.text}
+          </Animated.Text>
+
+          <View style={styles.divider} />
+
+          <Animated.Text
+            selectable
+            style={[
+              styles.translation,
+              {
+                textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
+                textShadowRadius: englishGlow,
+              },
+            ]}
+          >
+            {currentAyah.translation}
+          </Animated.Text>
+        </ScrollView>
+
+        {/* Soft fade + hint that content continues, only while not scrolled to bottom */}
+        {!atBottom && (
+          <View pointerEvents="none" style={styles.readerFade}>
+            <View style={styles.readerFadeInner} />
+          </View>
+        )}
+      </View>
+
+      {/* ---------- Fixed playback bar ---------- */}
+      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 12 }]}>
+        <View style={styles.controlsRow}>
           <Pressable style={styles.secondaryBtn} onPress={onPrevious} hitSlop={6} accessibilityLabel="Previous ayat">
             <Text style={styles.secondaryGlyph}>‹</Text>
           </Pressable>
@@ -263,36 +282,19 @@ const FlowScreen = React.memo(function FlowScreen({
           <Pressable style={styles.secondaryBtn} onPress={onNext} hitSlop={6} accessibilityLabel="Next ayah">
             <Text style={styles.secondaryGlyph}>›</Text>
           </Pressable>
+
+          <Pressable
+            style={styles.moreBtn}
+            onPress={() => setMoreVisible(true)}
+            hitSlop={6}
+            accessibilityLabel="More options"
+          >
+            <Text style={styles.moreGlyph}>⋯</Text>
+          </Pressable>
         </View>
-
-        <View style={styles.speedGroup}>
-          {SPEEDS.map((value) => (
-            <Pressable
-              key={value}
-              onPress={() => onSpeed(value)}
-              style={[styles.speedItem, speed === value && styles.speedItemActive]}
-            >
-              <Text style={[styles.speedText, speed === value && styles.speedTextActive]}>
-                {value}×
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Pressable style={styles.downloadBtn} onPress={onOpenDownloadManager}>
-          <Text style={styles.downloadBtnText}>⬇ Download Audio</Text>
-        </Pressable>
-
-        <Pressable style={styles.repeatBtn} onPress={onRepeat} hitSlop={8}>
-          <Text style={styles.repeatText}>↻ Repeat Ayat</Text>
-        </Pressable>
-
-        <Text style={styles.sourceNote}>
-          Uthmani script · Mishary Alafasy recitation{"\n"}
-          Saheeh International · English: Ibrahim Walk
-        </Text>
       </View>
 
+      {/* ---------- Jump-to-ayat modal ---------- */}
       <Modal
         transparent
         visible={jumpVisible}
@@ -314,11 +316,7 @@ const FlowScreen = React.memo(function FlowScreen({
               onSubmitEditing={handleJump}
             />
             <View style={styles.modalActions}>
-              <Pressable
-                style={styles.modalCancel}
-                onPress={() => setJumpVisible(false)}
-                hitSlop={6}
-              >
+              <Pressable style={styles.modalCancel} onPress={() => setJumpVisible(false)} hitSlop={6}>
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </Pressable>
               <Pressable
@@ -333,6 +331,60 @@ const FlowScreen = React.memo(function FlowScreen({
           </View>
         </View>
       </Modal>
+
+      {/* ---------- "More" bottom sheet: speed, repeat, download, credits ---------- */}
+      <Modal
+        transparent
+        visible={moreVisible}
+        animationType="slide"
+        onRequestClose={() => setMoreVisible(false)}
+      >
+        <Pressable style={styles.sheetOverlay} onPress={() => setMoreVisible(false)}>
+          <Pressable style={styles.sheetCard} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.sheetHandle} />
+
+            <Text style={styles.sheetLabel}>Playback speed</Text>
+            <View style={styles.speedGroup}>
+              {SPEEDS.map((value) => (
+                <Pressable
+                  key={value}
+                  onPress={() => onSpeed(value)}
+                  style={[styles.speedItem, speed === value && styles.speedItemActive]}
+                >
+                  <Text style={[styles.speedText, speed === value && styles.speedTextActive]}>
+                    {value}×
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Pressable
+              style={styles.sheetRow}
+              onPress={() => {
+                setMoreVisible(false);
+                onRepeat();
+              }}
+            >
+              <Text style={styles.sheetRowText}>↻ Repeat this ayat</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.sheetRow}
+              onPress={() => {
+                setMoreVisible(false);
+                onOpenDownloadManager();
+              }}
+            >
+              <Text style={styles.sheetRowText}>⬇ Download audio</Text>
+            </Pressable>
+
+            <Text style={styles.sourceNote}>
+              Uthmani script · Mishary Alafasy recitation{"\n"}
+              Saheeh International · English: Ibrahim Walk
+            </Text>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 });
@@ -346,13 +398,15 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       flex: 1,
       backgroundColor: c.bg,
     },
+
+    // ---- Header ----
     header: {
       backgroundColor: c.surface,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: c.line,
     },
     headerRow: {
-      height: 56,
+      height: 52,
       paddingHorizontal: 16,
       flexDirection: "row",
       alignItems: "center",
@@ -401,7 +455,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     },
     surahName: {
       fontFamily: serif,
-      fontSize: 17,
+      fontSize: 16,
       fontWeight: "700",
       color: c.ink,
     },
@@ -418,39 +472,22 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       height: 3,
       backgroundColor: c.accent,
     },
-    cardWrap: {
-      flex: 1,
-      minHeight: 0,
-      padding: 24,
-    },
-    card: {
-      flex: 1,
-      borderRadius: radii.card,
-      backgroundColor: c.surface,
-      padding: 28,
-      borderWidth: 1,
-      borderColor: c.line,
-      ...t.shadow,
-    },
-    cardScroll: {
-      flex: 1,
-    },
-    cardScrollContent: {
-      paddingBottom: 4,
-    },
-    cardActive: {
-      borderColor: c.accentBorder,
-    },
-    cardTop: {
+
+    // ---- Meta strip (ayat pill / audio toggles / stage) ----
+    metaBar: {
       flexDirection: "row",
-      justifyContent: "space-between",
       alignItems: "center",
-      marginBottom: 24,
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      paddingVertical: 10,
+      backgroundColor: c.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.line,
     },
     ayatPill: {
       backgroundColor: c.well,
       borderRadius: radii.pill,
-      paddingHorizontal: 12,
+      paddingHorizontal: 14,
       paddingVertical: 5,
     },
     ayatPillText: {
@@ -459,12 +496,31 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.inkSoft,
       letterSpacing: 0.4,
     },
+    metaRight: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    audioChip: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      backgroundColor: c.well,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    audioChipText: {
+      fontSize: 12,
+      fontWeight: "700",
+      lineHeight: 15,
+      color: c.muted,
+    },
     stagePill: {
       flexDirection: "row",
       alignItems: "center",
       gap: 6,
       borderRadius: radii.pill,
-      paddingHorizontal: 11,
+      paddingHorizontal: 10,
       paddingVertical: 5,
     },
     stageDot: {
@@ -478,6 +534,20 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       fontSize: 11,
       fontWeight: "600",
     },
+
+    // ---- Reader: the single scrollable ayah area ----
+    readerWrap: {
+      flex: 1,
+      minHeight: 0,
+    },
+    reader: {
+      flex: 1,
+    },
+    readerContent: {
+      paddingHorizontal: 24,
+      paddingTop: 28,
+      paddingBottom: 40,
+    },
     arabic: {
       fontSize: 32,
       lineHeight: 58,
@@ -488,65 +558,36 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     divider: {
       height: 1,
       backgroundColor: c.line,
-      marginVertical: 20,
+      marginVertical: 22,
     },
     translation: {
       fontSize: 17.5,
       lineHeight: 29,
       color: c.inkSoft,
     },
-    cardTopRight: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 8,
+    readerFade: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      bottom: 0,
+      height: 36,
     },
-    audioChip: {
-      width: 32,
-      height: 32,
-      borderRadius: 16,
-      backgroundColor: c.well,
-      justifyContent: "center",
-      alignItems: "center",
+    readerFadeInner: {
+      flex: 1,
+      backgroundColor: c.bg,
+      opacity: 0.001, // placeholder layer; real fade handled by shadow below
     },
-    audioChipText: {
-      fontSize: 13,
-      fontWeight: "700",
-      lineHeight: 16,
-      color: c.muted,
-    },
-    speedGroup: {
-      flexDirection: "row",
-      alignSelf: "center",
+
+    // ---- Bottom playback bar ----
+    bottomBar: {
       backgroundColor: c.surface,
-      borderRadius: radii.control,
-      borderWidth: 1,
-      borderColor: c.line,
-      padding: 4,
-      gap: 2,
-      marginTop: 20,
-    },
-    speedItem: {
-      paddingHorizontal: 13,
-      paddingVertical: 7,
-      borderRadius: radii.control - 8,
-    },
-    speedItemActive: {
-      backgroundColor: c.ink,
-    },
-    speedText: {
-      color: c.muted,
-      fontSize: 12.5,
-      fontWeight: "600",
-    },
-    speedTextActive: {
-      color: c.bg,
-    },
-    footer: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.line,
+      paddingTop: 14,
       paddingHorizontal: 24,
-      paddingBottom: 20,
+      ...t.shadow,
     },
-    controls: {
-      marginTop: 20,
+    controlsRow: {
       flexDirection: "row",
       justifyContent: "center",
       alignItems: "center",
@@ -556,8 +597,8 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       width: 48,
       height: 48,
       borderRadius: 24,
-      backgroundColor: c.surface,
-      borderWidth: 1,
+      backgroundColor: c.well,
+      borderWidth: StyleSheet.hairlineWidth,
       borderColor: c.line,
       justifyContent: "center",
       alignItems: "center",
@@ -580,39 +621,26 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.onAccent,
       fontSize: 24,
     },
-    repeatBtn: {
-      alignSelf: "center",
-      paddingHorizontal: 16,
-      paddingVertical: 10,
-      marginTop: 18,
-    },
-    repeatText: {
-      color: c.inkSoft,
-      fontSize: 14,
-      fontWeight: "600",
-    },
-    downloadBtn: {
-      backgroundColor: c.surface,
-      borderRadius: radii.card,
-      paddingVertical: 14,
-      paddingHorizontal: 20,
-      alignItems: "center",
+    moreBtn: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: c.well,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: c.line,
-      marginTop: 20,
+      justifyContent: "center",
+      alignItems: "center",
+      position: "absolute",
+      right: 0,
     },
-    downloadBtnText: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: c.ink,
+    moreGlyph: {
+      fontSize: 22,
+      fontWeight: "700",
+      color: c.inkSoft,
+      marginTop: -6,
     },
-    sourceNote: {
-      textAlign: "center",
-      color: c.muted,
-      fontSize: 11,
-      lineHeight: 17,
-      marginTop: 20,
-    },
+
+    // ---- Jump modal ----
     modalOverlay: {
       flex: 1,
       backgroundColor: c.overlay,
@@ -678,6 +706,84 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       color: c.onAccent,
       fontSize: 15,
       fontWeight: "700",
+    },
+
+    // ---- "More" bottom sheet ----
+    sheetOverlay: {
+      flex: 1,
+      backgroundColor: c.overlay,
+      justifyContent: "flex-end",
+    },
+    sheetCard: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radii.card,
+      borderTopRightRadius: radii.card,
+      paddingHorizontal: 24,
+      paddingTop: 12,
+      paddingBottom: 32,
+      borderWidth: 1,
+      borderColor: c.line,
+      borderBottomWidth: 0,
+    },
+    sheetHandle: {
+      width: 36,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: c.line,
+      alignSelf: "center",
+      marginBottom: 20,
+    },
+    sheetLabel: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: c.muted,
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+      marginBottom: 10,
+    },
+    speedGroup: {
+      flexDirection: "row",
+      backgroundColor: c.well,
+      borderRadius: radii.control,
+      borderWidth: 1,
+      borderColor: c.line,
+      padding: 4,
+      gap: 2,
+      marginBottom: 22,
+    },
+    speedItem: {
+      flex: 1,
+      alignItems: "center",
+      paddingVertical: 9,
+      borderRadius: radii.control - 8,
+    },
+    speedItemActive: {
+      backgroundColor: c.ink,
+    },
+    speedText: {
+      color: c.muted,
+      fontSize: 13,
+      fontWeight: "600",
+    },
+    speedTextActive: {
+      color: c.bg,
+    },
+    sheetRow: {
+      paddingVertical: 16,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.line,
+    },
+    sheetRowText: {
+      fontSize: 15,
+      fontWeight: "600",
+      color: c.ink,
+    },
+    sourceNote: {
+      textAlign: "center",
+      color: c.muted,
+      fontSize: 11,
+      lineHeight: 17,
+      marginTop: 20,
     },
   });
 }
