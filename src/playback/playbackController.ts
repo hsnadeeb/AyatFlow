@@ -477,14 +477,22 @@ class PlaybackController {
         if (session !== this.sessionRef) return;
         if (fileInfo.exists && fileInfo.size > 0) {
           audioSource = localAudioPath;
+          console.log("[English Audio] Using local file:", localAudioPath);
         }
       }
-    } catch {}
+    } catch (error) {
+      console.warn("[English Audio] Failed to check local file:", error);
+    }
 
     if (!audioSource) {
       // Use englishAudio URL if available
       audioSource =
         ayah.englishAudio && ayah.englishAudio.trim() !== "" ? ayah.englishAudio : null;
+      if (audioSource) {
+        console.log("[English Audio] Using remote URL:", audioSource);
+      } else {
+        console.log("[English Audio] No audio source available");
+      }
     }
     if (session !== this.sessionRef) return;
 
@@ -505,13 +513,15 @@ class PlaybackController {
         this.englishStartedRef = true;
         this.startPositionMonitoring();
       } catch (error) {
-        console.error("Failed to play English audio:", error);
+        console.error("[English Audio] Failed to play:", error);
         if (session !== this.sessionRef) return;
         // Fall back to text-to-speech if audio fails
+        console.log("[English Audio] Falling back to TTS");
         this.fallbackToTextToSpeech(ayah);
       }
     } else {
       // Fall back to text-to-speech if no audio file
+      console.log("[English Audio] No audio source, using TTS");
       this.fallbackToTextToSpeech(ayah);
     }
   }
@@ -537,6 +547,7 @@ class PlaybackController {
     this.emit();
 
     if (!this.state.audioPrefs.tafsir) {
+      console.log("[Tafsir TTS] Tafsir audio pref is disabled, skipping");
       this.advance();
       return;
     }
@@ -545,13 +556,16 @@ class PlaybackController {
     // be loading from the network/cache when we get here). Give it a moment
     // before giving up, so reading continues ayah after ayah even when the
     // commentary drawer is closed.
+    console.log("[Tafsir TTS] Waiting for tafsir text...");
     const text = await this.waitForTafsirText(session);
     if (session !== this.sessionRef) return;
     if (!text) {
+      console.log("[Tafsir TTS] No tafsir text available, advancing");
       this.advance();
       return;
     }
 
+    console.log(`[Tafsir TTS] Got tafsir text (${text.length} chars), starting speech`);
     this.speakTafsirText(text, session);
   }
 
@@ -578,9 +592,12 @@ class PlaybackController {
     const chunks = chunkText(text, 3600);
     let chunkIndex = 0;
 
+    console.log(`[Tafsir TTS] Starting speech for ${chunks.length} chunks in language ${language}`);
+
     const finish = () => {
       this.clearReadingTimer();
       if (session !== this.sessionRef) return;
+      console.log("[Tafsir TTS] Finished all chunks");
       if (this.state.playing) this.advance();
     };
 
@@ -591,6 +608,7 @@ class PlaybackController {
         return;
       }
       const chunk = chunks[chunkIndex++];
+      console.log(`[Tafsir TTS] Speaking chunk ${chunkIndex}/${chunks.length}, length: ${chunk.length}`);
 
       // Rough speech-time estimate (~110ms per char at 1×, slower in Urdu) plus
       // a generous floor for engine startup. advance() is idempotent, so a late
@@ -598,6 +616,7 @@ class PlaybackController {
       this.clearReadingTimer();
       this.readingTimer = setTimeout(() => {
         if (session !== this.sessionRef) return;
+        console.warn("[Tafsir TTS] Watchdog timeout - advancing anyway");
         finish();
       }, Math.max(6000, chunk.length * 110));
 
@@ -607,14 +626,16 @@ class PlaybackController {
         pitch: 1,
         onDone: () => {
           if (session !== this.sessionRef) return;
+          console.log(`[Tafsir TTS] Chunk ${chunkIndex} completed`);
           speakNextChunk();
         },
         onStopped: () => {
           // Tafsir speech stopped (skip/prev/pause/panel closed mid-read) — a
           // new start* call already bumped sessionRef, so nothing to do here.
+          console.log("[Tafsir TTS] Speech stopped");
         },
         onError: (error) => {
-          console.error("Tafsir text-to-speech error:", error);
+          console.error("[Tafsir TTS] Speech error:", error);
           if (session !== this.sessionRef) return;
           // Skip the failed chunk rather than stalling the whole flow.
           speakNextChunk();

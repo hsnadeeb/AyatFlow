@@ -45,6 +45,7 @@ import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetMana
 import { syncTafsirCacheFromShared } from "./src/tafsirCache";
 import { playbackController } from "./src/playback/playbackController";
 import { registerWidgetPlaybackTask } from "./src/widget/WidgetPlaybackTask";
+import { sharedStorage } from "./src/sharedStorage";
 
 // Register the headless task used by the home screen widget controls.
 // This must run at module load so the native side can find the task.
@@ -136,6 +137,15 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
+        // Ensure the AyatFlow folder exists in shared storage before any sync operations
+        if (sharedStorage?.ensureAyatFlowFolder) {
+          try {
+            await sharedStorage.ensureAyatFlowFolder();
+          } catch (error) {
+            console.warn("Failed to ensure AyatFlow folder:", error);
+          }
+        }
+
         // Move any old AsyncStorage-era user data into the AyatFlow folder, then
         // sync with the shared folder (restore on fresh install / refresh otherwise).
         // Must run before ensureInitialized so restored progress/prefs are read.

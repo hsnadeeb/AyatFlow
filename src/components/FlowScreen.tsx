@@ -203,16 +203,19 @@ const FlowScreen = React.memo(function FlowScreen({
     }
   }
 
-  // Reset the reading scroll position and collapse the commentary drawer
-  // whenever the ayah changes (prev/next/jump) — every ayah starts fresh.
-  // The tafsir text is cleared too so the playback engine never speaks the
-  // previous ayah's commentary for the new ayah while it loads.
+  // Reset the reading scroll position when the ayah changes (prev/next/jump).
+  // Keep the tafsir drawer open if it was already open so automatic playback
+  // continues smoothly. The tafsir text is cleared so the playback engine never
+  // speaks the previous ayah's commentary for the new ayah while it loads.
   useEffect(() => {
     contentScrollRef.current?.scrollTo({ y: 0, animated: false });
     setAtBottom(true);
-    setTafsirOpen(false);
+    // Don't auto-close tafsir on index change - let it stay open for continuous playback
     setTafsirText(null);
-    tafsirAnim.setValue(0);
+    // Reset animation but keep the drawer state
+    if (!tafsirOpen) {
+      tafsirAnim.setValue(0);
+    }
   }, [index]);
 
   const isBookmarked = bookmarks.includes(`${surah.number}:${currentAyah.numberInSurah}`);
@@ -316,8 +319,8 @@ const FlowScreen = React.memo(function FlowScreen({
             icon="🗣"
             label="Read tafsir aloud"
             value={audioPrefs.tafsir}
-            onBg={c.well}
-            onText={c.ink}
+            onBg={c.accentStrong}
+            onText={c.accent}
             onToggle={() => onToggleAudio("tafsir")}
           />
           <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
