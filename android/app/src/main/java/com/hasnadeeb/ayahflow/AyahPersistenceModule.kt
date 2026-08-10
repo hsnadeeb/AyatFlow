@@ -11,6 +11,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableArray
 import java.io.BufferedOutputStream
 import java.io.File
@@ -25,7 +26,11 @@ import java.util.zip.ZipOutputStream
  * survive app uninstall/reinstall:
  *
  * - Data backup: /storage/emulated/0/Download/AyatFlow/ayah-flow-backup.json
+ * - Data files:  /storage/emulated/0/Download/AyatFlow/data/ (one JSON file each)
  * - Audio:       /storage/emulated/0/Download/AyatFlow/quran-audio/SurahN/{arabic,english}/N.mp3
+ *
+ * The whole Download/AyatFlow folder is portable: copying it to a new phone and
+ * installing the app there restores audio, bookmarks and progress.
  *
  * - Android 10+ (API 29+): MediaStore.Downloads, no permissions needed.
  * - Android 9- (API 28-): public Downloads dir via File API (requires the
@@ -40,6 +45,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
 
     private val fileName = "ayah-flow-backup.json"
     private val backupRelativePath = "Download/AyatFlow/"
+    private val dataRelativeRoot = "Download/AyatFlow/data/"
     private val audioRelativeRoot = "Download/AyatFlow/quran-audio/"
     private val legacyRootDir = "AyatFlow"
 
@@ -75,6 +81,71 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
             promise.resolve(data?.toString(Charsets.UTF_8))
         } catch (e: Exception) {
             promise.reject("LOAD_BACKUP_FAILED", e.message, e)
+        }
+    }
+
+    // ---- Per-file data mirroring (Download/AyatFlow/data JSON files) ----
+
+    /**
+     * Write one JSON data file (bookmarks, progress, prefs, ...) into the shared
+     * "data" folder so the whole AyatFlow folder is portable across devices.
+     */
+    @ReactMethod
+    fun saveDataFile(relativeDir: String, dataFileName: String, content: String, promise: Promise) {
+        try {
+            if (content.isEmpty()) {
+                promise.resolve(false)
+                return
+            }
+            val bytes = content.toByteArray(Charsets.UTF_8)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                writeBytesViaMediaStore(bytes, "$dataRelativeRoot$relativeDir/", dataFileName, "application/json")
+            } else {
+                writeBytesLegacy(bytes, "$legacyRootDir/$relativeDir/$dataFileName")
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SAVE_DATA_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun readDataFile(relativeDir: String, dataFileName: String, promise: Promise) {
+        try {
+            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                readBytesViaMediaStore("$dataRelativeRoot$relativeDir/", dataFileName)
+            } else {
+                readLegacy("$legacyRootDir/$relativeDir/$dataFileName")
+            }
+            promise.resolve(data?.toString(Charsets.UTF_8))
+        } catch (e: Exception) {
+            promise.reject("READ_DATA_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun deleteDataFile(relativeDir: String, dataFileName: String, promise: Promise) {
+        try {
+            val relPath = "$dataRelativeRoot$relativeDir/"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = appContext.contentResolver
+                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val selection =
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+                val args = arrayOf(dataFileName, relPath)
+                resolver.query(collection, arrayOf(MediaStore.MediaColumns._ID), selection, args, null)
+                    ?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
+                            resolver.delete(uri, null, null)
+                        }
+                    }
+            } else {
+                deleteLegacy("$legacyRootDir/$relativeDir/$dataFileName")
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("DELETE_DATA_FAILED", e.message, e)
         }
     }
 
@@ -205,26 +276,52 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
             if (!sourceDir.exists() || !sourceDir.isDirectory) {
                 throw IOException("Source directory not found: $sourceDirPath")
             }
+            val allDirs = sourceDir.walkTopDown()
+                .filter { it.isDirectory && it != sourceDir }
+                .map { it.absolutePath.removePrefix(sourceDir.absolutePath).removePrefix("/") }
+                .toList()
+            zipAudioSelection(sourceDirPath, Arguments.fromArray(allDirs.toTypedArray()), zipPath, promise)
+        } catch (e: Exception) {
+            promise.reject("ZIP_AUDIO_FAILED", e.message, e)
+        }
+    }
+
+    /**
+     * Zip only the selected language folders (e.g. ["Surah1/arabic", "Surah2/english"])
+     * under the audio root. Used for per-language / multi-surah / all-surah sharing.
+     */
+    @ReactMethod
+    fun zipAudioSelection(audioRootPath: String, includes: ReadableArray, zipPath: String, promise: Promise) {
+        try {
+            val audioRoot = resolveSourceFile(audioRootPath)
+            if (!audioRoot.exists() || !audioRoot.isDirectory) {
+                throw IOException("Audio root not found: $audioRootPath")
+            }
             val dest = resolveSourceFile(zipPath)
             dest.parentFile?.mkdirs()
             if (dest.exists()) dest.delete()
 
-            val base = sourceDir.absolutePath
+            val base = audioRoot.absolutePath
             val buffer = ByteArray(64 * 1024)
             ZipOutputStream(BufferedOutputStream(FileOutputStream(dest))).use { zip ->
-                sourceDir.walkTopDown().forEach { file ->
-                    if (!file.isFile) return@forEach
-                    if (file.name.endsWith(".part") || file.name.endsWith(".tmp")) return@forEach
-                    val relPath = file.absolutePath.removePrefix(base).removePrefix("/")
-                    zip.putNextEntry(ZipEntry(relPath))
-                    file.inputStream().use { input ->
-                        var read = input.read(buffer)
-                        while (read != -1) {
-                            zip.write(buffer, 0, read)
-                            read = input.read(buffer)
+                for (i in 0 until includes.size()) {
+                    val rel = includes.getString(i) ?: continue
+                    val dir = File(audioRoot, rel)
+                    if (!dir.exists() || !dir.isDirectory) continue
+                    dir.walkTopDown().forEach { file ->
+                        if (!file.isFile) return@forEach
+                        if (file.name.endsWith(".part") || file.name.endsWith(".tmp")) return@forEach
+                        val relPath = file.absolutePath.removePrefix(base).removePrefix("/")
+                        zip.putNextEntry(ZipEntry(relPath))
+                        file.inputStream().use { input ->
+                            var read = input.read(buffer)
+                            while (read != -1) {
+                                zip.write(buffer, 0, read)
+                                read = input.read(buffer)
+                            }
                         }
+                        zip.closeEntry()
                     }
-                    zip.closeEntry()
                 }
             }
             promise.resolve(dest.absolutePath)

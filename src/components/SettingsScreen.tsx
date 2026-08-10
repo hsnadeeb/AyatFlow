@@ -71,7 +71,7 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
   const { palette: c, isDark, mode, setMode } = useTheme();
   const [storageMb, setStorageMb] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refreshStorage = useCallback(() => {
     let active = true;
     getDownloadManager()
       .getTotalStorageSize()
@@ -83,6 +83,15 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
       active = false;
     };
   }, []);
+
+  useEffect(() => refreshStorage(), [refreshStorage]);
+
+  // Keep the size live: downloading (foreground or background), deleting, or
+  // restoring audio all emit events, and the settings screen follows along.
+  useEffect(() => {
+    const unsubscribe = getDownloadManager().subscribe(() => refreshStorage());
+    return unsubscribe;
+  }, [refreshStorage]);
 
   const onModePress = useCallback(
     (m: ThemeMode) => {

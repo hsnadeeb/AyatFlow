@@ -4,7 +4,8 @@ import { NativeModules, Platform } from 'react-native';
 import { sharedStorage, ensureSharedStoragePermission } from './sharedStorage';
 
 const AUDIO_DIRECTORY = 'AyatFlow/quran-audio';
-const DOWNLOAD_STATUS_KEY = 'ayah-flow:download-status';
+const DOWNLOAD_STATUS_KEY = 'download-status.json';
+const LEGACY_STATUS_KEY = 'ayah-flow:download-status';
 const STATUS_TMP_SUFFIX = '.tmp';
 const PART_SUFFIX = '.part';
 
@@ -17,6 +18,10 @@ const DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 800;
 const PERMISSION_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Disk-walk results are reused for this long, so size queries stay cheap. */
+const SIZE_CACHE_TTL_MS = 4000;
+/** Progress events are coalesced so listeners don't get spammed every byte. */
+const PROGRESS_EMIT_THROTTLE_MS = 700;
 
 export type AudioType = 'arabic' | 'english';
 
@@ -44,6 +49,17 @@ export type SurahDownloadResult = {
   cancelled: boolean;
   failedItems: Array<{ ayahNumber: number; type: AudioType; error: string }>;
 };
+
+/** Events the UI can subscribe to so download state (sizes, per-surah
+ *  indicators) stays live even when a download was started elsewhere. */
+export type DownloadManagerEvent =
+  | { type: 'progress'; surahNumber: number }
+  | { type: 'fileComplete'; surahNumber: number; ayahNumber: number; audioType: AudioType }
+  | { type: 'batchDone'; surahNumber: number }
+  | { type: 'delete'; surahNumber?: number }
+  | { type: 'sync' };
+
+type DownloadEventListener = (event: DownloadManagerEvent) => void;
 
 function isValidPositiveInt(n: number): boolean {
   return Number.isInteger(n) && n > 0;
@@ -212,6 +228,13 @@ class DownloadManager {
 
   private sharedStoragePermission: { granted: boolean; checkedAt: number } | null = null;
 
+  /** Cached total-on-disk byte estimate (walk is expensive on big surahs). */
+  private sizeCache: { bytes: number; at: number } | null = null;
+
+  /** Listeners for download state changes (live UI updates). */
+  private listeners = new Set<DownloadEventListener>();
+  private lastProgressEmitAt = 0;
+
   constructor() {
     this.audioDir = this.getAudioDirectory();
     this.initPromise = this.loadStatus().catch((error) => {
@@ -233,8 +256,8 @@ class DownloadManager {
   private getAudioDirectory(): string {
     // Internal app storage holds the working copies used for playback. On Android,
     // completed downloads are ALSO mirrored to shared storage
-    // (/storage/emulated/0/Download/AyatFlow/quran-audio/) so they survive
-    // app uninstall/reinstall and get restored on next launch.
+    // (/storage/emulated/0/Download/AyatFlow/quran-audio/) so the whole AyatFlow
+    // folder is portable: copy it to a new phone and the app restores from it.
     return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
   }
 
@@ -251,6 +274,34 @@ class DownloadManager {
 
   private getFileName(surahNumber: number, ayahNumber: number, type: AudioType): string {
     return `Surah${surahNumber}/${type}/${ayahNumber}.mp3`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Events
+  // ---------------------------------------------------------------------
+
+  /** Subscribe to download state changes. Returns an unsubscribe function. */
+  subscribe(listener: DownloadEventListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private emit(event: DownloadManagerEvent): void {
+    if (event.type === 'progress') {
+      const now = Date.now();
+      if (now - this.lastProgressEmitAt < PROGRESS_EMIT_THROTTLE_MS) return;
+      this.lastProgressEmitAt = now;
+    }
+    this.invalidateSizeCache();
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.warn('DownloadManager: listener error', error);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -274,30 +325,20 @@ class DownloadManager {
 
   private async loadStatus(): Promise<void> {
     await this.ensureDirectoryExists();
-    const statusFilePath = `${this.audioDir}${DOWNLOAD_STATUS_KEY}`;
 
     try {
-      const info = await FileSystem.getInfoAsync(statusFilePath);
+      const info = await FileSystem.getInfoAsync(`${this.audioDir}${DOWNLOAD_STATUS_KEY}`);
       if (info.exists) {
-        const raw = await FileSystem.readAsStringAsync(statusFilePath, { encoding: 'utf8' });
-        try {
-          const loaded = JSON.parse(raw);
-          this.statusCache = {};
-          for (const [key, data] of Object.entries(loaded)) {
-            const status = data as { downloaded: boolean; filePath?: string; lastUpdated: number };
-            this.statusCache[key] = {
-              downloaded: !!status.downloaded,
-              progress: status.downloaded ? 1 : 0,
-              filePath: status.filePath,
-              lastUpdated: status.lastUpdated ?? Date.now(),
-            };
-          }
-        } catch (parseError) {
-          // Corrupt status file. Don't crash startup, and don't trust the file — but
-          // don't panic either: syncWithDiskFiles below rediscovers every completed
-          // download directly from the files that actually exist on disk.
-          console.error('DownloadManager: status file corrupt, rebuilding from disk', parseError);
-          this.statusCache = {};
+        await this.readStatusFrom(`${this.audioDir}${DOWNLOAD_STATUS_KEY}`);
+      } else {
+        // Older builds stored status as "ayah-flow:download-status" — carry it over.
+        const legacyInfo = await FileSystem.getInfoAsync(`${this.audioDir}${LEGACY_STATUS_KEY}`);
+        if (legacyInfo.exists) {
+          await this.readStatusFrom(`${this.audioDir}${LEGACY_STATUS_KEY}`);
+          await FileSystem.moveAsync({
+            from: `${this.audioDir}${LEGACY_STATUS_KEY}`,
+            to: `${this.audioDir}${DOWNLOAD_STATUS_KEY}`,
+          }).catch(() => {});
         }
       }
     } catch (error) {
@@ -308,6 +349,30 @@ class DownloadManager {
     await this.syncWithDiskFiles();
     await this.syncWithSharedStorage();
     await this.cleanupStalePartialFiles();
+    this.emit({ type: 'sync' });
+  }
+
+  private async readStatusFrom(statusFilePath: string): Promise<void> {
+    try {
+      const raw = await FileSystem.readAsStringAsync(statusFilePath, { encoding: 'utf8' });
+      const loaded = JSON.parse(raw);
+      this.statusCache = {};
+      for (const [key, data] of Object.entries(loaded)) {
+        const status = data as { downloaded: boolean; filePath?: string; lastUpdated: number };
+        this.statusCache[key] = {
+          downloaded: !!status.downloaded,
+          progress: status.downloaded ? 1 : 0,
+          filePath: status.filePath,
+          lastUpdated: status.lastUpdated ?? Date.now(),
+        };
+      }
+    } catch (parseError) {
+      // Corrupt status file. Don't crash startup, and don't trust the file — but
+      // don't panic either: syncWithDiskFiles below rediscovers every completed
+      // download directly from the files that actually exist on disk.
+      console.error('DownloadManager: status file corrupt, rebuilding from disk', parseError);
+      this.statusCache = {};
+    }
   }
 
   /**
@@ -610,6 +675,46 @@ class DownloadManager {
     return results.filter(Boolean).length / totalAyats;
   }
 
+  /**
+   * Fast, in-memory per-surah download info backed by the status cache (no disk
+   * stats) — used for the "downloaded" checkmark on surah lists and for the share
+   * picker. The cache is kept in sync by loadStatus / completion / delete events.
+   */
+  getSurahDownloadInfo(
+    surahNumber: number,
+    totalAyats: number
+  ): { downloadedAyahs: number; full: boolean; arabicCount: number; englishCount: number } {
+    let downloadedAyahs = 0;
+    let arabicCount = 0;
+    let englishCount = 0;
+    for (let a = 1; a <= totalAyats; a++) {
+      const arabic = this.statusCache[this.getAudioKey(surahNumber, a, 'arabic')]?.downloaded ?? false;
+      const english = this.statusCache[this.getAudioKey(surahNumber, a, 'english')]?.downloaded ?? false;
+      if (arabic) arabicCount++;
+      if (english) englishCount++;
+      if (arabic && english) downloadedAyahs++;
+    }
+    return {
+      downloadedAyahs,
+      full: downloadedAyahs === totalAyats,
+      arabicCount,
+      englishCount,
+    };
+  }
+
+  /** Set of surah numbers that are fully downloaded (both languages, every ayah). */
+  getDownloadedSurahs(totalAyatsBySurah: Record<number, number>): Set<number> {
+    const result = new Set<number>();
+    for (const [surahStr, total] of Object.entries(totalAyatsBySurah)) {
+      const surahNumber = Number(surahStr);
+      if (!Number.isInteger(surahNumber) || total <= 0) continue;
+      if (this.getSurahDownloadInfo(surahNumber, total).full) {
+        result.add(surahNumber);
+      }
+    }
+    return result;
+  }
+
   getStorageLocation(): string {
     if (Platform.OS === 'android') {
       return `/storage/emulated/0/Download/AyatFlow/quran-audio/`;
@@ -617,31 +722,45 @@ class DownloadManager {
     return this.audioDir;
   }
 
+  private invalidateSizeCache(): void {
+    this.sizeCache = null;
+  }
+
   async getTotalStorageSize(): Promise<number> {
     await this.whenReady();
     try {
-      return await this.getDirectorySize(this.audioDir);
+      const now = Date.now();
+      if (this.sizeCache && now - this.sizeCache.at < SIZE_CACHE_TTL_MS) {
+        return this.sizeCache.bytes;
+      }
+      const bytes = await this.getDirectorySize(this.audioDir);
+      this.sizeCache = { bytes, at: now };
+      return bytes;
     } catch (error) {
       console.error('Failed to calculate storage size:', error);
-      return 0;
+      return this.sizeCache?.bytes ?? 0;
     }
   }
 
+  /** Recursive directory size with a bounded fan-out; a full Al-Baqarah walk
+   *  (572 files) takes well under a second this way instead of dozens of seconds. */
   private async getDirectorySize(dirPath: string): Promise<number> {
     try {
       const entries = await FileSystem.readDirectoryAsync(dirPath);
-      let total = 0;
+      let fileTotal = 0;
+      const subDirs: string[] = [];
       for (const entry of entries) {
         const entryPath = `${dirPath}/${entry}`;
         const info = await FileSystem.getInfoAsync(entryPath);
         if (!info.exists) continue;
         if (info.isDirectory) {
-          total += await this.getDirectorySize(entryPath);
+          subDirs.push(entryPath);
         } else if (info.size) {
-          total += info.size;
+          fileTotal += info.size;
         }
       }
-      return total;
+      const subTotals = await runWithConcurrencyLimit(subDirs, 8, (dir) => this.getDirectorySize(dir));
+      return fileTotal + subTotals.reduce((sum, n) => sum + n, 0);
     } catch {
       return 0;
     }
@@ -724,6 +843,7 @@ class DownloadManager {
 
         this.statusCache[key] = { downloaded: true, progress: 1, filePath, lastUpdated: Date.now() };
         this.saveStatusImmediate();
+        this.emit({ type: 'fileComplete', surahNumber, ayahNumber, audioType: type });
 
         // Fire-and-forget — playback never depends on this copy existing.
         this.mirrorAudioToSharedStorage(surahNumber, ayahNumber, type, filePath);
@@ -776,6 +896,7 @@ class DownloadManager {
         const total = downloadProgress.totalBytesExpectedToWrite || 0;
         const progress = total > 0 ? downloadProgress.totalBytesWritten / total : 0;
         this.statusCache[key] = { ...this.statusCache[key], progress, lastUpdated: Date.now() };
+        this.emit({ type: 'progress', surahNumber });
         onProgress?.({
           surahNumber,
           ayahNumber,
@@ -825,6 +946,7 @@ class DownloadManager {
     }
     delete this.statusCache[key];
     this.saveStatusImmediate();
+    this.emit({ type: 'delete', surahNumber });
   }
 
   /**
@@ -867,6 +989,9 @@ class DownloadManager {
     });
 
     this.cancelledSurahs.delete(surahNumber);
+    if (result.succeeded > 0) {
+      this.emit({ type: 'batchDone', surahNumber });
+    }
     return result;
   }
 
@@ -901,6 +1026,7 @@ class DownloadManager {
 
     delete this.statusCache[key];
     this.saveStatusImmediate();
+    this.emit({ type: 'delete', surahNumber });
   }
 
   async deleteSurahAudio(surahNumber: number, totalAyats: number): Promise<void> {
@@ -913,30 +1039,42 @@ class DownloadManager {
   }
 
   // ---------------------------------------------------------------------
-  // Sharing / lifecycle
+  // Sharing — per language, per surah, multi-surah, or all surahs
   // ---------------------------------------------------------------------
 
   /**
-   * Packages every downloaded ayah (Arabic AND English) for the surah into a
-   * single ZIP archive and shares it, so the whole surah — not one sample
-   * file — is what lands on the recipient. Android zips natively; iOS falls
-   * back to a JS zip writer.
+   * Packages the downloaded audio for the selected surahs and languages into a
+   * single ZIP archive and shares it. Only files that actually exist on disk are
+   * included, so partially downloaded surahs share what they have.
    */
-  async shareSurahAudio(surahNumber: number, totalAyats: number): Promise<void> {
+  async shareAudios(
+    surahNumbers: number[],
+    languages: AudioType[],
+    totalAyatsBySurah: Record<number, number>
+  ): Promise<void> {
     await this.whenReady();
 
-    const downloaded: Array<{ ayahNumber: number; type: AudioType; filePath: string }> = [];
-    for (let i = 1; i <= totalAyats; i++) {
-      const [arabic, english] = await Promise.all([
-        this.getLocalAudioPath(surahNumber, i, 'arabic'),
-        this.getLocalAudioPath(surahNumber, i, 'english'),
-      ]);
-      if (arabic) downloaded.push({ ayahNumber: i, type: 'arabic', filePath: arabic });
-      if (english) downloaded.push({ ayahNumber: i, type: 'english', filePath: english });
+    const unique = [...new Set(surahNumbers)].filter((n) => Number.isInteger(n) && n > 0);
+    if (unique.length === 0) {
+      throw new Error('No surahs selected to share');
+    }
+    const wanted = new Set(languages.filter((l): l is AudioType => l === 'arabic' || l === 'english'));
+
+    const items: Array<{ surahNumber: number; ayahNumber: number; type: AudioType; filePath: string }> = [];
+    for (const surahNumber of unique) {
+      const total = totalAyatsBySurah[surahNumber] ?? 0;
+      if (total <= 0) continue;
+      const ayahNumbers = Array.from({ length: total }, (_, i) => i + 1);
+      await runWithConcurrencyLimit(ayahNumbers, 8, async (ayahNumber) => {
+        for (const type of wanted) {
+          const path = await this.getLocalAudioPath(surahNumber, ayahNumber, type);
+          if (path) items.push({ surahNumber, ayahNumber, type, filePath: path });
+        }
+      });
     }
 
-    if (downloaded.length === 0) {
-      throw new Error('No downloaded audio files found for this surah');
+    if (items.length === 0) {
+      throw new Error('No downloaded audio files found for the selected surahs');
     }
 
     const isAvailable = await Sharing.isAvailableAsync();
@@ -944,38 +1082,48 @@ class DownloadManager {
       throw new Error('Sharing is not available on this platform');
     }
 
-    const zipPath = await this.buildSurahZip(surahNumber, downloaded);
+    const zipPath = await this.buildSelectionZip(unique, items);
     try {
       await Sharing.shareAsync(zipPath, {
         mimeType: 'application/zip',
-        dialogTitle: `Share Surah ${surahNumber} audio`,
+        dialogTitle: unique.length === 1 ? `Share Surah ${unique[0]} audio` : 'Share Ayat Flow audio',
       });
     } finally {
       await FileSystem.deleteAsync(zipPath, { idempotent: true }).catch(() => {});
     }
   }
 
-  private async buildSurahZip(
-    surahNumber: number,
-    downloaded: Array<{ ayahNumber: number; type: AudioType; filePath: string }>
+  /** Backwards-compatible helper: share both languages of one surah. */
+  async shareSurahAudio(surahNumber: number, totalAyats: number): Promise<void> {
+    await this.shareAudios([surahNumber], ['arabic', 'english'], { [surahNumber]: totalAyats });
+  }
+
+  private async buildSelectionZip(
+    surahNumbers: number[],
+    items: Array<{ surahNumber: number; ayahNumber: number; type: AudioType; filePath: string }>
   ): Promise<string> {
-    const zipPath = `${FileSystem.cacheDirectory}share/Surah${surahNumber}.zip`;
+    const stamp = surahNumbers.length === 1 ? `Surah${surahNumbers[0]}` : 'AyatFlow-audio';
+    const zipPath = `${FileSystem.cacheDirectory}share/${stamp}.zip`;
     await FileSystem.makeDirectoryAsync(`${FileSystem.cacheDirectory}share`, { intermediates: true });
     await FileSystem.deleteAsync(zipPath, { idempotent: true });
 
-    const nativeZipper = sharedStorage?.zipAudioFiles;
+    const nativeZipper = sharedStorage?.zipAudioSelection;
     if (Platform.OS === 'android' && typeof nativeZipper === 'function') {
-      // Zip the whole surah folder natively — streams from disk, so even
-      // Al-Baqarah-sized downloads never blow the JS heap.
-      await nativeZipper(`${this.audioDir}Surah${surahNumber}`, zipPath);
+      // Zip only the language folders that actually have files, natively (streams
+      // from disk, so even all-114-surahs never blows the JS heap).
+      const includes = new Set<string>();
+      for (const item of items) {
+        includes.add(`Surah${item.surahNumber}/${item.type}`);
+      }
+      await nativeZipper(this.audioDir, Array.from(includes), zipPath);
       return zipPath;
     }
 
     // iOS (or an outdated native module): build the archive in JS.
     const files = [];
-    for (const item of downloaded) {
+    for (const item of items) {
       files.push({
-        name: `Surah${surahNumber}/${item.type}/${item.ayahNumber}.mp3`,
+        name: `Surah${item.surahNumber}/${item.type}/${item.ayahNumber}.mp3`,
         bytes: await readFileBytes(item.filePath),
       });
     }

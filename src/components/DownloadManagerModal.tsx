@@ -10,7 +10,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { getDownloadManager, DownloadProgress } from "../downloadManager";
+import { getDownloadManager, DownloadProgress, AudioType } from "../downloadManager";
 import { Surah, Ayah } from "../api";
 import { radii, useTheme, useThemedStyles } from "../theme";
 
@@ -144,6 +144,24 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
     refreshStorage();
   }, [downloadManager, surah, ayahs, refreshStorage, applyProgress]);
 
+  // Live updates from the download manager, no matter where the download was
+  // started (modal or background on surah open): keep the storage estimate
+  // fresh while files land, and re-scan confirmed progress when batches finish
+  // (a full disk scan per single file would be too heavy on long surahs).
+  useEffect(() => {
+    const unsubscribe = downloadManager.subscribe((event) => {
+      if (event.type === "progress" || event.type === "fileComplete") {
+        refreshStorage();
+      } else if (event.type === "batchDone" || event.type === "delete") {
+        if (surah && event.surahNumber === surah.number) {
+          loadExistingProgress();
+        }
+        refreshStorage();
+      }
+    });
+    return unsubscribe;
+  }, [downloadManager, surah, refreshStorage, loadExistingProgress]);
+
   useEffect(() => {
     if (visible && surah && ayahs.length > 0) {
       loadExistingProgress();
@@ -244,15 +262,37 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
     );
   }, [surah, ayahs.length, downloadManager, refreshStorage]);
 
-  const handleShare = useCallback(async () => {
-    if (!surah) return;
-    try {
-      await downloadManager.shareSurahAudio(surah.number, ayahs.length);
-    } catch (error) {
-      console.error("Share failed:", error);
-      Alert.alert("Share Failed", "Could not share audio. Download this surah first, then try again.");
-    }
-  }, [surah, ayahs.length, downloadManager]);
+  const shareWith = useCallback(
+    async (surahNumber: number, languages: AudioType[]) => {
+      try {
+        await downloadManager.shareAudios([surahNumber], languages, { [surahNumber]: ayahs.length });
+      } catch (error) {
+        console.error("Share failed:", error);
+        Alert.alert("Share Failed", "Could not share audio. Download this surah first, then try again.");
+      }
+    },
+    [ayahs.length, downloadManager]
+  );
+
+  const handleShare = useCallback(
+    (languages: AudioType[]) => {
+      if (!surah) return;
+      Alert.alert(
+        "Share Audio",
+        `Choose which audio to share for ${surah.englishName} (shares what's downloaded):`,
+        [
+          { text: "Arabic only", onPress: () => shareWith(surah.number, ["arabic"]) },
+          { text: "English only", onPress: () => shareWith(surah.number, ["english"]) },
+          {
+            text: "Arabic + English",
+            onPress: () => shareWith(surah.number, ["arabic", "english"]),
+          },
+          { text: "Cancel", style: "cancel" },
+        ]
+      );
+    },
+    [surah, shareWith]
+  );
 
   if (!surah) return null;
 
@@ -281,9 +321,16 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
           <View style={[styles.progressCard, allDone && styles.progressCardDone]}>
             <View style={styles.progressHeader}>
               <View>
-                <Text style={styles.progressTitle}>
-                  {allDone ? "All audio downloaded" : downloadedCount > 0 ? "Partially downloaded" : "Not downloaded"}
-                </Text>
+                <View style={styles.progressTitleRow}>
+                  {allDone && (
+                    <View style={styles.doneBadge} accessibilityLabel="Downloaded">
+                      <Text style={styles.doneBadgeText}>✓ Downloaded</Text>
+                    </View>
+                  )}
+                  <Text style={styles.progressTitle}>
+                    {allDone ? "All audio downloaded" : downloadedCount > 0 ? "Partially downloaded" : "Not downloaded"}
+                  </Text>
+                </View>
                 <Text style={styles.progressDetail}>
                   {downloadedCount} of {ayahs.length} ayats on device
                 </Text>
@@ -322,7 +369,7 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
 
                 {downloadedCount > 0 && (
                   <>
-                    <Pressable style={styles.shareBtn} onPress={handleShare} accessibilityRole="button">
+                    <Pressable style={styles.shareBtn} onPress={() => handleShare(["arabic", "english"])} accessibilityRole="button">
                       <Text style={styles.shareBtnText}>Share Audio</Text>
                     </Pressable>
                     <Pressable style={styles.deleteBtn} onPress={handleDelete} accessibilityRole="button">
@@ -340,8 +387,8 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
               {storageMb === null ? "Calculating storage usage…" : `${storageMb} MB of audio stored on this device.`}
             </Text>
             <Text style={styles.infoText}>
-              Download once, then listen offline. Audio is mirrored to shared storage, so even after
-              reinstalling the app your downloads are restored automatically — no need to re-download.
+              Everything lives in one "AyatFlow" folder — audio, bookmarks and progress. Copy it to a new
+              phone and the app picks it right up: no re-downloading, no lost bookmarks.
             </Text>
           </View>
 
@@ -469,6 +516,22 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       justifyContent: "space-between",
       alignItems: "center",
       marginBottom: 14,
+    },
+    progressTitleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    doneBadge: {
+      backgroundColor: c.success,
+      borderRadius: radii.pill,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+    },
+    doneBadgeText: {
+      color: "#FFFFFF",
+      fontSize: 10,
+      fontWeight: "800",
     },
     progressTitle: {
       fontSize: 16,

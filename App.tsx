@@ -22,6 +22,7 @@ import {
   getLastPosition,
   getSurahProgress,
   migrateLegacyBookmarks,
+  migrateStorageToFiles,
   toggleAyahBookmark,
   toggleSurahBookmark,
 } from "./src/storage";
@@ -31,6 +32,7 @@ import DownloadManager from "./src/components/DownloadManagerModal";
 import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import RestorePrompt from "./src/components/RestorePrompt";
+import ShareModal from "./src/components/ShareModal";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
 import {
   scheduleBackupSave,
@@ -73,6 +75,8 @@ function AppInner() {
   const [restorePromptVisible, setRestorePromptVisible] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadingSurahs, setDownloadingSurahs] = useState<Set<number>>(new Set());
+  const [downloadedSurahs, setDownloadedSurahs] = useState<Set<number>>(new Set());
+  const [shareVisible, setShareVisible] = useState(false);
 
   // Playback state mirrored from the shared controller
   const [flowData, setFlowData] = useState<{ surah: Surah; ayahs: Ayah[] } | null>(
@@ -95,6 +99,7 @@ function AppInner() {
   const stageRef = useRef(stage);
   const flowRef = useRef(flowData);
   const indexRef = useRef(index);
+  const surahsRef = useRef<Surah[]>([]);
 
   useEffect(() => {
     playingRef.current = playing;
@@ -131,9 +136,10 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        // Upgrade the old single bookmark list, then sync with the shared
-        // storage backup (restore on fresh install / refresh otherwise).
+        // Move any old AsyncStorage-era user data into the AyatFlow folder, then
+        // sync with the shared folder (restore on fresh install / refresh otherwise).
         // Must run before ensureInitialized so restored progress/prefs are read.
+        await migrateStorageToFiles();
         await migrateLegacyBookmarks();
         await syncBackup();
 
@@ -184,6 +190,32 @@ function AppInner() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Refresh the per-surah "downloaded" checkmarks whenever downloads change
+  // (foreground, background, delete, or startup sync) and when the surah list
+  // finishes loading. Reuses the previous Set when nothing changed so frequent
+  // progress events don't force pointless re-renders.
+  const refreshDownloadedSurahs = useCallback(() => {
+    const current = surahsRef.current;
+    if (current.length === 0) return;
+    const counts: Record<number, number> = {};
+    for (const s of current) counts[s.number] = s.numberOfAyahs;
+    setDownloadedSurahs((prev) => {
+      const next = getDownloadManager().getDownloadedSurahs(counts);
+      if (prev.size === next.size && [...prev].every((n) => next.has(n))) return prev;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    surahsRef.current = surahs;
+    if (surahs.length > 0) refreshDownloadedSurahs();
+  }, [surahs, refreshDownloadedSurahs]);
+
+  useEffect(() => {
+    const unsubscribe = getDownloadManager().subscribe(refreshDownloadedSurahs);
+    return unsubscribe;
+  }, [refreshDownloadedSurahs]);
 
   const handleSample = React.useCallback((sample: { channels: { frames: number[] }[] }) => {
     if (stageRef.current === "idle") return;
@@ -464,9 +496,11 @@ function AppInner() {
           downloadingSurahs={downloadingSurahs}
           surahBookmarks={surahBookmarks}
           bookmarksCount={bookmarks.length + surahBookmarks.length}
+          downloadedSurahs={downloadedSurahs}
           onOpenSurah={openSurahHandler}
           onOpenSettings={onOpenSettings}
           onOpenBookmarks={onOpenBookmarks}
+          onOpenShare={() => setShareVisible(true)}
           onToggleSurahBookmark={onToggleSurahBookmark}
           onWidgetPress={() => last && openSurahHandler(last.surah, last.ayahIndex)}
         />
@@ -556,6 +590,12 @@ function AppInner() {
   return (
     <SafeAreaProvider>
       {content}
+      <ShareModal
+        visible={shareVisible}
+        surahs={surahs}
+        downloadedSurahs={downloadedSurahs}
+        onClose={() => setShareVisible(false)}
+      />
       <RestorePrompt
         visible={restorePromptVisible}
         onDismiss={() => setRestorePromptVisible(false)}

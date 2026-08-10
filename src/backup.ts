@@ -18,11 +18,40 @@ import {
   LastPosition,
 } from "./storage";
 
+/**
+ * The app's whole data folder (<documentDirectory>/AyatFlow) is mirrored into
+ * shared storage at Download/AyatFlow:
+ *
+ *   Download/AyatFlow/
+ *     ayah-flow-backup.json          legacy combined snapshot (kept for compat)
+ *     data/
+ *       bookmarks.json
+ *       surah-bookmarks.json
+ *       progress.json
+ *       audio-prefs.json
+ *       last.json
+ *     quran-audio/SurahN/{arabic,english}/N.mp3   (mirrored by downloadManager)
+ *
+ * Copying Download/AyatFlow to a new phone and installing the app there is all
+ * that's needed to move everything over: on first launch syncBackup() restores
+ * the data files and the download manager restores the audio.
+ */
+
 const BACKUP_VERSION = 1;
 const SAVE_DEBOUNCE_MS = 1500;
 const BACKUP_FILE_NAME = "ayah-flow-backup.json";
+const DATA_SUBDIR = "data";
 const SAF_FOLDER_KEY = "ayah-flow:saf-backup-folder";
 const RESTORE_PROMPTED_KEY = "ayah-flow:restore-prompted";
+
+/** Files mirrored into Download/AyatFlow/data/ — the portable data files. */
+export const DATA_FILE_NAMES = [
+  "bookmarks.json",
+  "surah-bookmarks.json",
+  "progress.json",
+  "audio-prefs.json",
+  "last.json",
+] as const;
 
 type BackupData = {
   version: number;
@@ -58,6 +87,12 @@ async function collectBackupData(): Promise<BackupData> {
   };
 }
 
+// ---------------------------------------------------------------------
+// SAF (Storage Access Framework) helpers — the folder the user granted via
+// the system folder picker. Data files live in a "data" subfolder so the
+// folder structure matches the portable layout.
+// ---------------------------------------------------------------------
+
 /**
  * The folder the user granted us via the system folder picker
  * (Storage Access Framework). Lives in AsyncStorage, so it survives app
@@ -77,6 +112,55 @@ async function safFileName(uri: string): Promise<string> {
     return decodeURIComponent(lastSegment);
   } catch {
     return lastSegment;
+  }
+}
+
+async function safDataDirectory(folderUri: string): Promise<string | null> {
+  try {
+    const entries = await StorageAccessFramework.readDirectoryAsync(folderUri);
+    for (const entry of entries) {
+      if ((await safFileName(entry)) === DATA_SUBDIR) return entry;
+    }
+    return await StorageAccessFramework.makeDirectoryAsync(folderUri, DATA_SUBDIR);
+  } catch (error) {
+    console.warn("Failed to access SAF data folder:", error);
+    return null;
+  }
+}
+
+async function readFileViaSaf(dataDirUri: string, dataFileName: string): Promise<string | null> {
+  try {
+    const entries = await StorageAccessFramework.readDirectoryAsync(dataDirUri);
+    for (const entry of entries) {
+      if ((await safFileName(entry)) === dataFileName) {
+        return await StorageAccessFramework.readAsStringAsync(entry);
+      }
+    }
+  } catch (error) {
+    console.warn(`Failed to read ${dataFileName} via SAF:`, error);
+  }
+  return null;
+}
+
+async function writeFileViaSaf(dataDirUri: string, dataFileName: string, content: string): Promise<boolean> {
+  try {
+    const entries = await StorageAccessFramework.readDirectoryAsync(dataDirUri);
+    for (const entry of entries) {
+      if ((await safFileName(entry)) === dataFileName) {
+        await StorageAccessFramework.writeAsStringAsync(entry, content);
+        return true;
+      }
+    }
+    const fileUri = await StorageAccessFramework.createFileAsync(
+      dataDirUri,
+      dataFileName.replace(/\.json$/, ""),
+      "application/json"
+    );
+    await StorageAccessFramework.writeAsStringAsync(fileUri, content);
+    return true;
+  } catch (error) {
+    console.warn(`Failed to write ${dataFileName} via SAF:`, error);
+    return false;
   }
 }
 
@@ -116,6 +200,131 @@ async function writeBackupViaSaf(folderUri: string, data: string): Promise<boole
   }
 }
 
+// ---------------------------------------------------------------------
+// Per-file mirroring of the data folder
+// ---------------------------------------------------------------------
+
+/**
+ * Mirror every data file (bookmarks, progress, prefs, last position) into the
+ * shared folder — MediaStore on Android 10+, SAF folder if granted, and the
+ * legacy File API on Android 9-. This keeps Download/AyatFlow a complete,
+ * portable copy of the app's user data.
+ *
+ * Files whose content hasn't changed since the last mirror are skipped, so the
+ * frequent debounced saves during playback don't hammer MediaStore.
+ */
+async function mirrorDataToShared(): Promise<void> {
+  const [bookmarks, surahBookmarks, progress, audioPrefs, last] = await Promise.all([
+    getAyahBookmarks(),
+    getSurahBookmarks(),
+    getSurahProgress(),
+    getAudioPrefs(),
+    getLastPosition(),
+  ]);
+  const files: Array<[string, string]> = [
+    ["bookmarks.json", JSON.stringify(bookmarks)],
+    ["surah-bookmarks.json", JSON.stringify(surahBookmarks)],
+    ["progress.json", JSON.stringify(progress)],
+    ["audio-prefs.json", JSON.stringify(audioPrefs)],
+    ["last.json", JSON.stringify(last)],
+  ];
+
+  const changed = files.filter(([name, content]) => lastMirrored.get(name) !== content);
+
+  if (changed.length === 0) return;
+
+  const folder = await getBackupFolderUri();
+  const safDataDir = folder ? await safDataDirectory(folder) : null;
+
+  if (module && (await ensureSharedStoragePermission())) {
+    for (const [name, content] of changed) {
+      try {
+        await module.saveDataFile(DATA_SUBDIR, name, content);
+        lastMirrored.set(name, content);
+      } catch (error) {
+        console.warn(`Failed to mirror ${name} via MediaStore:`, error);
+      }
+    }
+  }
+
+  if (safDataDir) {
+    for (const [name, content] of changed) {
+      if (await writeFileViaSaf(safDataDir, name, content)) {
+        lastMirrored.set(name, content);
+      }
+    }
+  }
+}
+
+/** Content of the last successfully mirrored data file, to skip no-op writes. */
+const lastMirrored = new Map<string, string>();
+
+function resetLastMirrored(): void {
+  lastMirrored.clear();
+}
+
+/** Read one data file from shared storage (MediaStore first, then SAF). */
+async function readSharedDataFile(dataFileName: string): Promise<string | null> {
+  if (module && (await ensureSharedStoragePermission())) {
+    try {
+      const raw = await module.readDataFile(DATA_SUBDIR, dataFileName);
+      if (raw) return raw;
+    } catch (error) {
+      console.warn(`Failed to read ${dataFileName} via MediaStore:`, error);
+    }
+  }
+  const folder = await getBackupFolderUri();
+  if (folder) {
+    const safDataDir = await safDataDirectory(folder);
+    if (safDataDir) {
+      const raw = await readFileViaSaf(safDataDir, dataFileName);
+      if (raw) return raw;
+    }
+  }
+  return null;
+}
+
+/**
+ * Restore the individual data files from the shared folder into app storage.
+ * Returns true when at least the bookmark files were restored.
+ */
+async function restoreDataFromShared(): Promise<boolean> {
+  const [bookmarks, surahBookmarks] = await Promise.all([
+    readSharedDataFile("bookmarks.json"),
+    readSharedDataFile("surah-bookmarks.json"),
+  ]);
+  if (!bookmarks && !surahBookmarks) return false;
+
+  const [progress, audioPrefs, last] = await Promise.all([
+    readSharedDataFile("progress.json"),
+    readSharedDataFile("audio-prefs.json"),
+    readSharedDataFile("last.json"),
+  ]);
+
+  const parse = (raw: string | null, fallback: unknown): unknown => {
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  };
+
+  await Promise.all([
+    bookmarks ? setAyahBookmarks(parse(bookmarks, []) as string[]) : Promise.resolve(),
+    surahBookmarks ? setSurahBookmarks(parse(surahBookmarks, []) as number[]) : Promise.resolve(),
+    progress ? saveSurahProgressMap(parse(progress, {}) as Record<number, number>) : Promise.resolve(),
+    audioPrefs ? saveAudioPrefs(parse(audioPrefs, {}) as AudioPrefs) : Promise.resolve(),
+    last ? saveLastPosition(parse(last, null) as LastPosition) : Promise.resolve(),
+  ]);
+
+  return true;
+}
+
+// ---------------------------------------------------------------------
+// Combined backup (legacy) + save
+// ---------------------------------------------------------------------
+
 /** Write the backup JSON to shared storage (Android only, silently ignored elsewhere). */
 export async function saveBackup(): Promise<void> {
   const data = JSON.stringify(await collectBackupData());
@@ -134,6 +343,9 @@ export async function saveBackup(): Promise<void> {
   if (folder && (await writeBackupViaSaf(folder, data))) {
     wroteAny = true;
   }
+
+  // Always keep the per-file copies in sync — that's what makes the folder portable.
+  await mirrorDataToShared();
 
   if (!wroteAny && module) {
     console.warn("Backup was not written to any location");
@@ -176,14 +388,14 @@ async function restoreFromRaw(raw: string): Promise<boolean> {
 /**
  * "Reinstall sync": called once at startup.
  *
- * - If the app's local storage is empty (fresh install or cleared data) and a
- *   backup exists in shared storage, restore it into AsyncStorage.
- * - Otherwise refresh the backup file with the current local data.
+ * - If the app's local data is empty (fresh install or cleared data) and the
+ *   shared folder has data files, restore them into app storage.
+ * - Otherwise refresh the shared copies with the current local data.
  *
  * Returns true when a restore happened.
  *
- * Note: on Android 10+ a MediaStore backup written by a previous install
- * becomes unreadable after uninstall/reinstall (the file is unbound from the
+ * Note: on Android 10+ a MediaStore file written by a previous install can
+ * become unreadable after uninstall/reinstall (the file is unbound from the
  * app). If the user has granted access to the backup folder via the system
  * folder picker (Storage Access Framework), that copy is tried as a fallback.
  */
@@ -202,11 +414,14 @@ export async function syncBackup(): Promise<boolean> {
     Object.keys(progress).length === 0;
 
   if (!isEmpty) {
-    // Existing install: keep local data, just refresh the backup copy.
+    // Existing install: keep local data, just refresh the shared copies.
     scheduleBackupSave();
     return false;
   }
 
+  if (await restoreDataFromShared()) return true;
+
+  // Fall back to the legacy combined backup blob.
   if (module && (await ensureSharedStoragePermission())) {
     try {
       const raw = await module.loadBackup();
@@ -232,6 +447,9 @@ export async function syncBackup(): Promise<boolean> {
  */
 export async function restoreBackupFromSafFolder(folderUri: string): Promise<boolean> {
   await saveBackupFolderUri(folderUri);
+  const restored = await restoreDataFromShared();
+  if (restored) return true;
+
   const raw = await readBackupViaSaf(folderUri);
   if (!raw) return false;
   return restoreFromRaw(raw);
