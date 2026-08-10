@@ -101,8 +101,10 @@ export default function DownloadManager({
           recomputeTotal();
         }
       );
-      setDownloadedCount(ayahs.length);
-      setTotalProgress(1);
+      // Refresh from the actual on-disk state: per-ayah failures are swallowed
+      // inside downloadSurahAudio, so never claim a surah is fully downloaded
+      // when some files failed.
+      await loadExistingProgress();
       refreshStorage();
     } catch (error) {
       console.error("Download failed:", error);
@@ -117,6 +119,7 @@ export default function DownloadManager({
     downloadManager,
     recomputeTotal,
     refreshStorage,
+    loadExistingProgress,
   ]);
 
   const handleDelete = useCallback(async () => {
@@ -289,7 +292,8 @@ export default function DownloadManager({
           <View style={styles.infoCard}>
             <Text style={styles.infoTitle}>Storage Location</Text>
             <Text style={styles.infoText}>
-              Audio files are stored in:
+              Playback uses copies inside the app's private storage. A mirror
+              copy is kept in shared storage so downloads survive reinstalls:
             </Text>
             <Text style={styles.locationText}>
               {storageLocation}

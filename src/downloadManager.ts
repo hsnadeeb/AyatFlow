@@ -27,10 +27,19 @@ class DownloadManager {
   private audioDir: string;
   private statusCache: DownloadStatus = {};
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  private initPromise: Promise<void> | null = null;
 
   constructor() {
     this.audioDir = this.getAudioDirectory();
-    this.loadStatus();
+    // loadStatus is async; hold onto the promise so every status check can
+    // await it before trusting the (initially empty) cache. Otherwise a fast
+    // "isDownloaded?" right after launch reports false and re-downloads.
+    this.initPromise = this.loadStatus().catch(() => {});
+  }
+
+  /** Resolves once the status cache has been loaded and synced with disk. */
+  private async whenReady(): Promise<void> {
+    await this.initPromise;
   }
 
   private getAudioDirectory(): string {
@@ -111,8 +120,10 @@ class DownloadManager {
         if (this.statusCache[key]?.downloaded) continue;
 
         const destPath = `${this.audioDir}${this.getFileName(surahNumber, ayahNumber, type)}`;
+        // Native side already scopes to "Download/AyatFlow/quran-audio/",
+        // so only pass the surah/language path here.
         const restored = await sharedStorage.restoreAudioFile(
-          `quran-audio/Surah${surahNumber}/${type}`,
+          `Surah${surahNumber}/${type}`,
           `${ayahNumber}.mp3`,
           destPath
         );
@@ -145,7 +156,7 @@ class DownloadManager {
     if (!(await ensureSharedStoragePermission())) return;
     try {
       await sharedStorage.saveAudioFile(
-        `quran-audio/Surah${surahNumber}/${type}`,
+        `Surah${surahNumber}/${type}`,
         `${ayahNumber}.mp3`,
         sourcePath
       );
@@ -163,7 +174,7 @@ class DownloadManager {
     if (!(await ensureSharedStoragePermission())) return;
     try {
       await sharedStorage.deleteAudioFile(
-        `quran-audio/Surah${surahNumber}/${type}`,
+        `Surah${surahNumber}/${type}`,
         `${ayahNumber}.mp3`
       );
     } catch (error) {
@@ -317,6 +328,7 @@ class DownloadManager {
   }
 
   async isDownloaded(surahNumber: number, ayahNumber: number, type: 'arabic' | 'english'): Promise<boolean> {
+    await this.whenReady();
     const key = this.getAudioKey(surahNumber, ayahNumber, type);
     const status = this.statusCache[key];
     
@@ -342,6 +354,7 @@ class DownloadManager {
   }
 
   async getLocalAudioPath(surahNumber: number, ayahNumber: number, type: 'arabic' | 'english'): Promise<string | null> {
+    await this.whenReady();
     const key = this.getAudioKey(surahNumber, ayahNumber, type);
     const status = this.statusCache[key];
     
@@ -367,6 +380,13 @@ class DownloadManager {
     const filePath = `${this.audioDir}${fileName}`;
 
     await this.ensureDirectoryExists();
+
+    // Create the per-surah/per-language subdirectories. Android's native
+    // download task refuses to start when the target directory is missing,
+    // which silently broke every download when the hierarchical layout was
+    // introduced.
+    const parentDir = filePath.substring(0, filePath.lastIndexOf('/'));
+    await FileSystem.makeDirectoryAsync(parentDir, { intermediates: true });
 
     // Check if already downloaded and valid
     const existingPath = await this.getLocalAudioPath(surahNumber, ayahNumber, type);
@@ -489,8 +509,22 @@ class DownloadManager {
   }
 
   async getDownloadStatus(surahNumber: number, ayahNumber: number, type: 'arabic' | 'english'): Promise<number> {
+    await this.whenReady();
     const key = this.getAudioKey(surahNumber, ayahNumber, type);
-    return this.statusCache[key]?.progress ?? 0;
+    const status = this.statusCache[key];
+    if (!status) return 0;
+    if (status.downloaded) {
+      // Don't report "downloaded" for entries whose file vanished from disk.
+      if (!status.filePath) return 0;
+      const fileInfo = await FileSystem.getInfoAsync(status.filePath);
+      if (!fileInfo.exists || !(fileInfo.size && fileInfo.size > 1000)) {
+        delete this.statusCache[key];
+        this.debouncedSave();
+        return 0;
+      }
+      return 1;
+    }
+    return status.progress ?? 0;
   }
 
   getStorageLocation(): string {
@@ -504,6 +538,7 @@ class DownloadManager {
   }
 
   async getSurahDownloadProgress(surahNumber: number, totalAyats: number): Promise<number> {
+    await this.whenReady();
     let downloadedCount = 0;
     
     for (let i = 1; i <= totalAyats; i++) {
@@ -544,23 +579,46 @@ class DownloadManager {
   }
 
   async getTotalStorageSize(): Promise<number> {
+    await this.whenReady();
     try {
       const files = await FileSystem.readDirectoryAsync(this.audioDir);
       let totalSize = 0;
-      
+
       for (const file of files) {
-        if (file.endsWith('.mp3')) {
-          const filePath = `${this.audioDir}${file}`;
-          const fileInfo = await FileSystem.getInfoAsync(filePath);
-          if (fileInfo.exists && fileInfo.size) {
+        const filePath = `${this.audioDir}${file}`;
+        const fileInfo = await FileSystem.getInfoAsync(filePath);
+        if (fileInfo.exists) {
+          if (fileInfo.isDirectory) {
+            totalSize += await this.getDirectorySize(filePath);
+          } else if (fileInfo.size) {
             totalSize += fileInfo.size;
           }
         }
       }
-      
+
       return totalSize;
     } catch (error) {
       console.error('Failed to calculate storage size:', error);
+      return 0;
+    }
+  }
+
+  private async getDirectorySize(dirPath: string): Promise<number> {
+    try {
+      const entries = await FileSystem.readDirectoryAsync(dirPath);
+      let total = 0;
+      for (const entry of entries) {
+        const entryPath = `${dirPath}/${entry}`;
+        const info = await FileSystem.getInfoAsync(entryPath);
+        if (!info.exists) continue;
+        if (info.isDirectory) {
+          total += await this.getDirectorySize(entryPath);
+        } else if (info.size) {
+          total += info.size;
+        }
+      }
+      return total;
+    } catch {
       return 0;
     }
   }

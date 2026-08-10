@@ -19,6 +19,8 @@ import { getSurah, getSurahs, Ayah, Surah } from "./src/api";
 import {
   getAyahBookmarks,
   getSurahBookmarks,
+  getLastPosition,
+  getSurahProgress,
   migrateLegacyBookmarks,
   toggleAyahBookmark,
   toggleSurahBookmark,
@@ -28,8 +30,14 @@ import FlowScreen from "./src/components/FlowScreen";
 import DownloadManager from "./src/components/DownloadManager";
 import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
+import RestorePrompt from "./src/components/RestorePrompt";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
-import { scheduleBackupSave, saveBackup, syncBackup } from "./src/backup";
+import {
+  scheduleBackupSave,
+  saveBackup,
+  syncBackup,
+  shouldOfferRestorePick,
+} from "./src/backup";
 import { ThemeProvider, useTheme } from "./src/theme";
 import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetManager";
 import { playbackController } from "./src/playback/playbackController";
@@ -62,6 +70,7 @@ function AppInner() {
   const [surahBookmarks, setSurahBookmarks] = useState<number[]>([]);
   const [downloadManagerVisible, setDownloadManagerVisible] = useState(false);
   const [downloadManagerSurah, setDownloadManagerSurah] = useState<Surah | null>(null);
+  const [restorePromptVisible, setRestorePromptVisible] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadingSurahs, setDownloadingSurahs] = useState<Set<number>>(new Set());
 
@@ -158,6 +167,15 @@ function AppInner() {
       } finally {
         setLoading(false);
       }
+
+      // After a reinstall Android 10+ hides the previous MediaStore backup
+      // from the reinstalled app, so offer the user the system folder picker
+      // once to re-grant access and restore their bookmarks.
+      try {
+        if (await shouldOfferRestorePick()) {
+          setRestorePromptVisible(true);
+        }
+      } catch {}
     })();
 
     return () => {
@@ -392,6 +410,25 @@ function AppInner() {
     closeDownloadManager();
   }, []);
 
+  const onRestoredFromBackup = useCallback(async () => {
+    // Backup was restored from the picked folder; refresh the UI state so the
+    // bookmarks and reading position show up immediately.
+    try {
+      const [b, sb, lastPos, prog] = await Promise.all([
+        getAyahBookmarks(),
+        getSurahBookmarks(),
+        getLastPosition(),
+        getSurahProgress(),
+      ]);
+      setBookmarks(b);
+      setSurahBookmarks(sb);
+      if (lastPos) setLast(lastPos);
+      if (Object.keys(prog).length > 0) setProgress(prog);
+    } catch (error) {
+      console.error("Failed to refresh restored data:", error);
+    }
+  }, []);
+
   const openSurahHandler = useCallback(
     (number: number, resumeIndex?: number) => {
       openSurah(number, resumeIndex ?? 0);
@@ -414,83 +451,71 @@ function AppInner() {
     );
   }
 
+  let content: React.ReactNode = null;
+
   if (screen === "home") {
-    return (
-      <SafeAreaProvider>
-        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
-          <StatusBar style={isDark ? "light" : "dark"} />
-          <HomeScreen
-            surahs={surahs}
-            last={last}
-            progress={progress}
-            downloadingSurahs={downloadingSurahs}
-            surahBookmarks={surahBookmarks}
-            bookmarksCount={bookmarks.length + surahBookmarks.length}
-            onOpenSurah={openSurahHandler}
-            onOpenSettings={onOpenSettings}
-            onOpenBookmarks={onOpenBookmarks}
-            onToggleSurahBookmark={onToggleSurahBookmark}
-            onWidgetPress={() => last && openSurahHandler(last.surah, last.ayahIndex)}
-          />
-          {loading && (
-            <View style={styles.loadingOverlay}>
-              <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
-                <ActivityIndicator size="small" color={colors.accent} />
-                <Text style={[styles.loadingText, { color: colors.inkSoft }]}>
-                  Opening Surah…
-                </Text>
-              </View>
+    content = (
+      <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
+        <StatusBar style={isDark ? "light" : "dark"} />
+        <HomeScreen
+          surahs={surahs}
+          last={last}
+          progress={progress}
+          downloadingSurahs={downloadingSurahs}
+          surahBookmarks={surahBookmarks}
+          bookmarksCount={bookmarks.length + surahBookmarks.length}
+          onOpenSurah={openSurahHandler}
+          onOpenSettings={onOpenSettings}
+          onOpenBookmarks={onOpenBookmarks}
+          onToggleSurahBookmark={onToggleSurahBookmark}
+          onWidgetPress={() => last && openSurahHandler(last.surah, last.ayahIndex)}
+        />
+        {loading && (
+          <View style={styles.loadingOverlay}>
+            <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+              <ActivityIndicator size="small" color={colors.accent} />
+              <Text style={[styles.loadingText, { color: colors.inkSoft }]}>
+                Opening Surah…
+              </Text>
             </View>
-          )}
-        </SafeAreaView>
-      </SafeAreaProvider>
+          </View>
+        )}
+      </SafeAreaView>
     );
-  }
-
-  if (screen === "settings") {
-    return (
-      <SafeAreaProvider>
-        <SafeAreaView
-          style={[styles.container, { backgroundColor: colors.bg }]}
-          edges={["bottom"]}
-        >
-          <StatusBar style={isDark ? "light" : "dark"} />
-          <SettingsScreen
-            audioPrefs={audioPrefs}
-            onToggleAudio={onToggleAudio}
-            onClose={onCloseSubScreen}
-          />
-        </SafeAreaView>
-      </SafeAreaProvider>
+  } else if (screen === "settings") {
+    content = (
+      <SafeAreaView
+        style={[styles.container, { backgroundColor: colors.bg }]}
+        edges={["bottom"]}
+      >
+        <StatusBar style={isDark ? "light" : "dark"} />
+        <SettingsScreen
+          audioPrefs={audioPrefs}
+          onToggleAudio={onToggleAudio}
+          onClose={onCloseSubScreen}
+        />
+      </SafeAreaView>
     );
-  }
-
-  if (screen === "bookmarks") {
-    return (
-      <SafeAreaProvider>
-        <SafeAreaView
-          style={[styles.container, { backgroundColor: colors.bg }]}
-          edges={["bottom"]}
-        >
-          <StatusBar style={isDark ? "light" : "dark"} />
-          <BookmarksScreen
-            surahBookmarks={surahBookmarks}
-            ayahBookmarks={bookmarks}
-            surahs={surahs}
-            onOpenSurah={openSurahHandler}
-            onToggleSurahBookmark={onToggleSurahBookmark}
-            onRemoveAyahBookmark={onRemoveAyahBookmark}
-            onClose={onCloseSubScreen}
-          />
-        </SafeAreaView>
-      </SafeAreaProvider>
+  } else if (screen === "bookmarks") {
+    content = (
+      <SafeAreaView
+        style={[styles.container, { backgroundColor: colors.bg }]}
+        edges={["bottom"]}
+      >
+        <StatusBar style={isDark ? "light" : "dark"} />
+        <BookmarksScreen
+          surahBookmarks={surahBookmarks}
+          ayahBookmarks={bookmarks}
+          surahs={surahs}
+          onOpenSurah={openSurahHandler}
+          onToggleSurahBookmark={onToggleSurahBookmark}
+          onRemoveAyahBookmark={onRemoveAyahBookmark}
+          onClose={onCloseSubScreen}
+        />
+      </SafeAreaView>
     );
-  }
-
-  if (!flowData || !currentAyah) return null;
-
-  return (
-    <SafeAreaProvider>
+  } else if (flowData && currentAyah) {
+    content = (
       <SafeAreaView
         style={[styles.container, { backgroundColor: colors.bg }]}
         edges={["bottom"]}
@@ -525,6 +550,17 @@ function AppInner() {
           onClose={onCloseDownloadManager}
         />
       </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaProvider>
+      {content}
+      <RestorePrompt
+        visible={restorePromptVisible}
+        onDismiss={() => setRestorePromptVisible(false)}
+        onRestored={onRestoredFromBackup}
+      />
     </SafeAreaProvider>
   );
 }

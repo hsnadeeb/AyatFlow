@@ -78,7 +78,8 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
 
     /**
      * Copy a freshly downloaded file from app storage into shared storage.
-     * relativeDir looks like "quran-audio/Surah1/arabic".
+     * relativeDir looks like "Surah1/arabic" (the "quran-audio/" root is
+     * added by audioRelativeRoot).
      */
     @ReactMethod
     fun saveAudioFile(relativeDir: String, audioName: String, sourcePath: String, promise: Promise) {

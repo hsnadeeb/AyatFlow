@@ -11,12 +11,14 @@ export const sharedStorage =
 
 /**
  * Android 9 and below need a runtime grant to touch the public Downloads
- * directory. Android 10+ (MediaStore path) needs nothing.
+ * directory. Android 10 (API 29) also requires WRITE_EXTERNAL_STORAGE to
+ * write to the MediaStore.Downloads collection. Android 11+ (API 30+)
+ * needs nothing.
  */
 export async function ensureSharedStoragePermission(): Promise<boolean> {
   if (!sharedStorage) return false;
   const sdk = Number(Platform.Version ?? 99);
-  if (sdk >= 29) return true;
+  if (sdk >= 30) return true;
   try {
     const granted = await PermissionsAndroid.request(
       PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
