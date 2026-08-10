@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
@@ -14,6 +14,11 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ayah, Surah } from "../api";
 import { radii, serif, useTheme, useThemedStyles } from "../theme";
+import {
+  TAFSIR_EDITIONS,
+  TafsirLanguage,
+  getTafsirForAyah,
+} from "../tafsirService";
 
 type Props = {
   surah: Surah;
@@ -106,6 +111,32 @@ const FlowScreen = React.memo(function FlowScreen({
   const [atBottom, setAtBottom] = useState(true);
   const contentScrollRef = useRef<ScrollView>(null);
 
+  // Tafsir view state.
+  const [tafsirVisible, setTafsirVisible] = useState(false);
+  const [tafsirLanguage, setTafsirLanguage] = useState<TafsirLanguage>("urdu");
+  const [tafsirText, setTafsirText] = useState<string | null>(null);
+  const [tafsirLoading, setTafsirLoading] = useState(false);
+  const [tafsirError, setTafsirError] = useState(false);
+
+  const loadTafsir = useCallback(async () => {
+    if (!tafsirVisible) return;
+    setTafsirLoading(true);
+    setTafsirError(false);
+    try {
+      const text = await getTafsirForAyah(surah.number, currentAyah.numberInSurah, tafsirLanguage);
+      setTafsirText(text);
+    } catch (error) {
+      console.error("Failed to load tafsir:", error);
+      setTafsirError(true);
+    } finally {
+      setTafsirLoading(false);
+    }
+  }, [tafsirVisible, surah.number, currentAyah.numberInSurah, tafsirLanguage]);
+
+  useEffect(() => {
+    if (tafsirVisible) loadTafsir();
+  }, [tafsirVisible, loadTafsir]);
+
   // Reset the reading scroll position whenever the ayah changes (prev/next/jump).
   useEffect(() => {
     contentScrollRef.current?.scrollTo({ y: 0, animated: false });
@@ -168,6 +199,14 @@ const FlowScreen = React.memo(function FlowScreen({
                 <ActivityIndicator size="small" color={c.accent} />
               </View>
             )}
+            <Pressable
+              style={styles.iconBtn}
+              onPress={() => setTafsirVisible(true)}
+              hitSlop={6}
+              accessibilityLabel="Tafsir"
+            >
+              <Text style={styles.tafsirGlyph}>📖</Text>
+            </Pressable>
             <Pressable
               style={styles.iconBtn}
               onPress={onBookmark}
@@ -372,6 +411,16 @@ const FlowScreen = React.memo(function FlowScreen({
               style={styles.sheetRow}
               onPress={() => {
                 setMoreVisible(false);
+                setTafsirVisible(true);
+              }}
+            >
+              <Text style={styles.sheetRowText}>📖 Tafsir</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.sheetRow}
+              onPress={() => {
+                setMoreVisible(false);
                 onOpenDownloadManager();
               }}
             >
@@ -381,6 +430,83 @@ const FlowScreen = React.memo(function FlowScreen({
             <Text style={styles.sourceNote}>
               Uthmani script · Mishary Alafasy recitation{"\n"}
               Saheeh International · English: Ibrahim Walk
+            </Text>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ---------- Tafsir bottom sheet ---------- */}
+      <Modal
+        transparent
+        visible={tafsirVisible}
+        animationType="slide"
+        onRequestClose={() => setTafsirVisible(false)}
+      >
+        <Pressable style={styles.sheetOverlay} onPress={() => setTafsirVisible(false)}>
+          <Pressable style={styles.tafsirSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.sheetHandle} />
+
+            <View style={styles.tafsirHeader}>
+              <View style={styles.tafsirHeaderText}>
+                <Text style={styles.tafsirTitle}>📖 Tafsir</Text>
+                <Text style={styles.tafsirSubtitle}>
+                  {surah.englishName} · Ayat {currentAyah.numberInSurah}
+                </Text>
+              </View>
+              <Pressable
+                style={styles.tafsirCloseBtn}
+                onPress={() => setTafsirVisible(false)}
+                hitSlop={6}
+                accessibilityLabel="Close tafsir"
+              >
+                <Text style={styles.tafsirCloseGlyph}>✕</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.tafsirTabs}>
+              {(["urdu", "english"] as const).map((lang) => (
+                <Pressable
+                  key={lang}
+                  onPress={() => setTafsirLanguage(lang)}
+                  style={[styles.tafsirTab, tafsirLanguage === lang && styles.tafsirTabActive]}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: tafsirLanguage === lang }}
+                >
+                  <Text
+                    style={[styles.tafsirTabText, tafsirLanguage === lang && styles.tafsirTabTextActive]}
+                  >
+                    {lang === "urdu" ? "اردو" : "English"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {tafsirLoading ? (
+              <View style={styles.tafsirStateBox}>
+                <ActivityIndicator size="small" color={c.accent} />
+                <Text style={styles.tafsirStateText}>Loading tafsir…</Text>
+              </View>
+            ) : tafsirError ? (
+              <View style={styles.tafsirStateBox}>
+                <Text style={styles.tafsirStateText}>Couldn't load tafsir. Check your connection.</Text>
+                <Pressable style={styles.tafsirRetryBtn} onPress={() => loadTafsir()} hitSlop={6}>
+                  <Text style={styles.tafsirRetryText}>Retry</Text>
+                </Pressable>
+              </View>
+            ) : tafsirText === null ? (
+              <View style={styles.tafsirStateBox}>
+                <Text style={styles.tafsirStateText}>No tafsir is available for this ayah.</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.tafsirScroll} showsVerticalScrollIndicator={false}>
+                <Text style={[styles.tafsirText, tafsirLanguage === "urdu" && styles.tafsirTextUrdu]}>
+                  {tafsirText}
+                </Text>
+              </ScrollView>
+            )}
+
+            <Text style={styles.tafsirAttribution}>
+              {TAFSIR_EDITIONS[tafsirLanguage].name} · {TAFSIR_EDITIONS[tafsirLanguage].author}
             </Text>
           </Pressable>
         </Pressable>
@@ -434,6 +560,9 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     },
     starActive: {
       color: c.accent,
+    },
+    tafsirGlyph: {
+      fontSize: 16,
     },
     headerCenter: {
       flex: 1,
@@ -784,6 +913,125 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       fontSize: 11,
       lineHeight: 17,
       marginTop: 20,
+    },
+
+    // ---- Tafsir bottom sheet ----
+    tafsirSheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radii.card,
+      borderTopRightRadius: radii.card,
+      paddingHorizontal: 24,
+      paddingTop: 12,
+      paddingBottom: 28,
+      borderWidth: 1,
+      borderColor: c.line,
+      borderBottomWidth: 0,
+      maxHeight: "88%",
+    },
+    tafsirHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 14,
+    },
+    tafsirHeaderText: {
+      flex: 1,
+    },
+    tafsirTitle: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.ink,
+    },
+    tafsirSubtitle: {
+      fontSize: 12.5,
+      color: c.muted,
+      marginTop: 3,
+    },
+    tafsirCloseBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      backgroundColor: c.well,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      justifyContent: "center",
+      alignItems: "center",
+      marginLeft: 12,
+    },
+    tafsirCloseGlyph: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: c.inkSoft,
+    },
+    tafsirTabs: {
+      flexDirection: "row",
+      backgroundColor: c.well,
+      borderRadius: radii.control,
+      borderWidth: 1,
+      borderColor: c.line,
+      padding: 4,
+      gap: 2,
+      marginBottom: 16,
+    },
+    tafsirTab: {
+      flex: 1,
+      alignItems: "center",
+      paddingVertical: 9,
+      borderRadius: radii.control - 8,
+    },
+    tafsirTabActive: {
+      backgroundColor: c.ink,
+    },
+    tafsirTabText: {
+      color: c.muted,
+      fontSize: 13,
+      fontWeight: "600",
+    },
+    tafsirTabTextActive: {
+      color: c.bg,
+    },
+    tafsirScroll: {
+      flexGrow: 0,
+      flexShrink: 1,
+    },
+    tafsirText: {
+      fontSize: 15,
+      lineHeight: 24,
+      color: c.inkSoft,
+    },
+    tafsirTextUrdu: {
+      textAlign: "right",
+      fontSize: 16.5,
+      lineHeight: 30,
+      color: c.ink,
+    },
+    tafsirStateBox: {
+      alignItems: "center",
+      paddingVertical: 36,
+      gap: 12,
+    },
+    tafsirStateText: {
+      fontSize: 13.5,
+      color: c.muted,
+      textAlign: "center",
+      lineHeight: 20,
+    },
+    tafsirRetryBtn: {
+      backgroundColor: c.accent,
+      borderRadius: radii.control,
+      paddingVertical: 10,
+      paddingHorizontal: 28,
+    },
+    tafsirRetryText: {
+      color: c.onAccent,
+      fontSize: 14,
+      fontWeight: "700",
+    },
+    tafsirAttribution: {
+      textAlign: "center",
+      color: c.muted,
+      fontSize: 11,
+      marginTop: 16,
     },
   });
 }
