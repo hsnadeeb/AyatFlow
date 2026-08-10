@@ -3,9 +3,12 @@ package com.hasnadeeb.ayahflow
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -57,6 +60,72 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     private val appContext: Context = reactContext.applicationContext
 
     override fun getName(): String = "AyahPersistenceModule"
+
+    // ---------------------------------------------------------------------
+    // All-files access (Android 11+) — makes /storage/emulated/0/AyatFlow
+    // directly readable/writable, so the folder is visible in file managers
+    // and survives uninstall/reinstall (MediaStore files become unreadable
+    // to a reinstalled app).
+    // ---------------------------------------------------------------------
+
+    @ReactMethod
+    fun hasAllFilesAccess(promise: Promise) {
+        try {
+            promise.resolve(
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                    Environment.isExternalStorageManager()
+            )
+        } catch (e: Exception) {
+            promise.reject("ALL_FILES_ACCESS_CHECK_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun requestAllFilesAccess(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !Environment.isExternalStorageManager()
+            ) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:${appContext.packageName}")
+                )
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                appContext.startActivity(intent)
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("ALL_FILES_ACCESS_REQUEST_FAILED", e.message, e)
+        }
+    }
+
+    /** Whether the AyatFlow folder already exists on shared storage. */
+    @ReactMethod
+    fun isAyatFlowFolderPresent(promise: Promise) {
+        try {
+            val root = File(sharedStorageRoot(), legacyRootDir)
+            promise.resolve(root.exists())
+        } catch (e: Exception) {
+            promise.reject("FOLDER_CHECK_FAILED", e.message, e)
+        }
+    }
+
+    /**
+     * Create the AyatFlow folder (and its subfolders) up front so it always
+     * exists even before the first data/audio write.
+     */
+    @ReactMethod
+    fun ensureAyatFlowFolder(promise: Promise) {
+        try {
+            val root = File(sharedStorageRoot(), legacyRootDir)
+            File(root, "data").mkdirs()
+            File(root, "quran-audio").mkdirs()
+            File(root, "tafsir").mkdirs()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("FOLDER_CREATE_FAILED", e.message, e)
+        }
+    }
 
     // ---------------------------------------------------------------------
     // Shared storage layout
