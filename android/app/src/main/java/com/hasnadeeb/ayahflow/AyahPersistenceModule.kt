@@ -34,9 +34,12 @@ import java.util.zip.ZipOutputStream
  * │   ├── surah-bookmarks.json
  * │   ├── progress.json
  * │   ├── audio-prefs.json
- * │   └── last.json
- * └── quran-audio/
- *     └── SurahN/{arabic,english}/N.mp3
+ * │   ├── last.json
+ * │   └── tafsir-language.json
+ * ├── quran-audio/
+ * │   └── SurahN/{arabic,english}/N.mp3
+ * └── tafsir/
+ *     └── {urdu,english}/N.json
  *
  * The whole AyatFlow folder is portable: copying it to a new phone and
  * installing the app there allows the app to restore the data.
@@ -71,6 +74,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     private val backupRelativePath = "AyatFlow/"
     private val dataRelativeRoot = "AyatFlow/data/"
     private val audioRelativeRoot = "AyatFlow/quran-audio/"
+    private val tafsirRelativeRoot = "AyatFlow/tafsir/"
 
     /**
      * Used by the legacy File API on Android 9 and below.
@@ -538,6 +542,186 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             promise.reject(
                 "LIST_AUDIO_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Tafsir cache mirroring
+    // ---------------------------------------------------------------------
+
+    /**
+     * Write one tafsir cache file into:
+     *
+     * /AyatFlow/tafsir/{language}/{surahNumber}.json
+     */
+    @ReactMethod
+    fun saveTafsirFile(
+        language: String,
+        surahNumber: String,
+        content: String,
+        promise: Promise
+    ) {
+        try {
+            if (content.isEmpty()) {
+                promise.resolve(false)
+                return
+            }
+
+            val bytes = content.toByteArray(Charsets.UTF_8)
+            val relPath = "$tafsirRelativeRoot$language/"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                writeBytesViaMediaStore(
+                    bytes,
+                    relPath,
+                    "$surahNumber.json",
+                    "application/json"
+                )
+            } else {
+                writeBytesLegacy(
+                    bytes,
+                    "$legacyRootDir/tafsir/$language/$surahNumber.json"
+                )
+            }
+
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject(
+                "SAVE_TAFSIR_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    @ReactMethod
+    fun readTafsirFile(
+        language: String,
+        surahNumber: String,
+        promise: Promise
+    ) {
+        try {
+            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                readBytesViaMediaStore(
+                    "$tafsirRelativeRoot$language/",
+                    "$surahNumber.json"
+                )
+            } else {
+                readLegacy(
+                    "$legacyRootDir/tafsir/$language/$surahNumber.json"
+                )
+            }
+
+            promise.resolve(
+                data?.toString(Charsets.UTF_8)
+            )
+        } catch (e: Exception) {
+            promise.reject(
+                "READ_TAFSIR_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    /**
+     * List every tafsir cache file in shared storage.
+     *
+     * Returns relative paths such as:
+     *
+     * tafsir/urdu/7.json
+     */
+    @ReactMethod
+    fun listTafsirFiles(
+        promise: Promise
+    ) {
+        try {
+            val result =
+                Arguments.createArray()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver =
+                    appContext.contentResolver
+
+                val collection =
+                    MediaStore.Files.getContentUri("external")
+
+                val projection = arrayOf(
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.RELATIVE_PATH
+                )
+
+                val selection =
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+
+                val args =
+                    arrayOf("$tafsirRelativeRoot%")
+
+                resolver.query(
+                    collection,
+                    projection,
+                    selection,
+                    args,
+                    null
+                )?.use { cursor ->
+
+                    val nameCol =
+                        cursor.getColumnIndexOrThrow(
+                            MediaStore.MediaColumns.DISPLAY_NAME
+                        )
+
+                    val pathCol =
+                        cursor.getColumnIndexOrThrow(
+                            MediaStore.MediaColumns.RELATIVE_PATH
+                        )
+
+                    while (cursor.moveToNext()) {
+                        val name =
+                            cursor.getString(nameCol)
+                                ?: continue
+
+                        val rel =
+                            cursor.getString(pathCol)
+                                ?: continue
+
+                        result.pushString(
+                            "${rel.removePrefix(tafsirRelativeRoot)}$name"
+                        )
+                    }
+                }
+            } else {
+                val root =
+                    File(
+                        legacyAyatFlowRoot(),
+                        "tafsir"
+                    )
+
+                if (root.exists()) {
+                    root.listFiles()?.forEach { langDir ->
+                        if (!langDir.isDirectory) {
+                            return@forEach
+                        }
+
+                        langDir.listFiles()?.forEach { file ->
+                            if (file.isFile &&
+                                file.name.endsWith(".json")
+                            ) {
+                                result.pushString(
+                                    "tafsir/${langDir.name}/${file.name}"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject(
+                "LIST_TAFSIR_FAILED",
                 e.message,
                 e
             )

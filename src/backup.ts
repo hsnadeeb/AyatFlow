@@ -8,9 +8,11 @@ import {
   getLastPosition,
   getSurahBookmarks,
   getSurahProgress,
+  getTafsirLanguagePreference,
   saveAudioPrefs,
   saveLastPosition,
   saveSurahProgressMap,
+  saveTafsirLanguagePreference,
   setAyahBookmarks,
   setSurahBookmarks,
   clearLastPosition,
@@ -30,11 +32,14 @@ import {
  *       progress.json
  *       audio-prefs.json
  *       last.json
+ *       tafsir-language.json
  *     quran-audio/SurahN/{arabic,english}/N.mp3   (mirrored by downloadManager)
+ *     tafsir/{urdu,english}/N.json                (mirrored by tafsirCache)
  *
  * Copying AyatFlow to a new phone and installing the app there is all
  * that's needed to move everything over: on first launch syncBackup() restores
- * the data files and the download manager restores the audio.
+ * the data files, syncTafsirCacheFromShared() restores the tafsir cache, and
+ * the download manager restores the audio.
  */
 
 const BACKUP_VERSION = 1;
@@ -51,6 +56,7 @@ export const DATA_FILE_NAMES = [
   "progress.json",
   "audio-prefs.json",
   "last.json",
+  "tafsir-language.json",
 ] as const;
 
 type BackupData = {
@@ -214,12 +220,13 @@ async function writeBackupViaSaf(folderUri: string, data: string): Promise<boole
  * frequent debounced saves during playback don't hammer MediaStore.
  */
 async function mirrorDataToShared(): Promise<void> {
-  const [bookmarks, surahBookmarks, progress, audioPrefs, last] = await Promise.all([
+  const [bookmarks, surahBookmarks, progress, audioPrefs, last, tafsirLanguage] = await Promise.all([
     getAyahBookmarks(),
     getSurahBookmarks(),
     getSurahProgress(),
     getAudioPrefs(),
     getLastPosition(),
+    getTafsirLanguagePreference(),
   ]);
   const files: Array<[string, string]> = [
     ["bookmarks.json", JSON.stringify(bookmarks)],
@@ -227,6 +234,7 @@ async function mirrorDataToShared(): Promise<void> {
     ["progress.json", JSON.stringify(progress)],
     ["audio-prefs.json", JSON.stringify(audioPrefs)],
     ["last.json", JSON.stringify(last)],
+    ["tafsir-language.json", JSON.stringify(tafsirLanguage)],
   ];
 
   const changed = files.filter(([name, content]) => lastMirrored.get(name) !== content);
@@ -295,10 +303,11 @@ async function restoreDataFromShared(): Promise<boolean> {
   ]);
   if (!bookmarks && !surahBookmarks) return false;
 
-  const [progress, audioPrefs, last] = await Promise.all([
+  const [progress, audioPrefs, last, tafsirLanguage] = await Promise.all([
     readSharedDataFile("progress.json"),
     readSharedDataFile("audio-prefs.json"),
     readSharedDataFile("last.json"),
+    readSharedDataFile("tafsir-language.json"),
   ]);
 
   const parse = (raw: string | null, fallback: unknown): unknown => {
@@ -316,6 +325,11 @@ async function restoreDataFromShared(): Promise<boolean> {
     progress ? saveSurahProgressMap(parse(progress, {}) as Record<number, number>) : Promise.resolve(),
     audioPrefs ? saveAudioPrefs(parse(audioPrefs, {}) as AudioPrefs) : Promise.resolve(),
     last ? saveLastPosition(parse(last, null) as LastPosition) : Promise.resolve(),
+    tafsirLanguage
+      ? saveTafsirLanguagePreference(
+          parse(tafsirLanguage, "urdu") === "english" ? "english" : "urdu"
+        )
+      : Promise.resolve(),
   ]);
 
   return true;

@@ -42,6 +42,7 @@ import {
 } from "./src/backup";
 import { ThemeProvider, useTheme } from "./src/theme";
 import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetManager";
+import { syncTafsirCacheFromShared } from "./src/tafsirCache";
 import { playbackController } from "./src/playback/playbackController";
 import { registerWidgetPlaybackTask } from "./src/widget/WidgetPlaybackTask";
 
@@ -141,6 +142,7 @@ function AppInner() {
         await migrateStorageToFiles();
         await migrateLegacyBookmarks();
         await syncBackup();
+        await syncTafsirCacheFromShared();
 
         const [loadedSurahs, savedBookmarks, savedSurahBookmarks] = await Promise.all([
           getSurahs(),
