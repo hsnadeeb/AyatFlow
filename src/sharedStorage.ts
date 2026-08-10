@@ -3,7 +3,7 @@ import { NativeModules, PermissionsAndroid, Platform } from "react-native";
 /**
  * Bridge to the native AyahPersistenceModule (Android only). Backs up app
  * data and mirrors audio downloads into shared storage
- * (/storage/emulated/0/Download/AyatFlow/) so they survive app uninstall.
+ * (/storage/emulated/0/AyatFlow/) so they survive app uninstall.
  * On iOS this is null: the app sandbox has no shared folder without cloud.
  */
 export const sharedStorage =

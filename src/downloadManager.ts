@@ -55,6 +55,7 @@ export type SurahDownloadResult = {
 export type DownloadManagerEvent =
   | { type: 'progress'; surahNumber: number }
   | { type: 'fileComplete'; surahNumber: number; ayahNumber: number; audioType: AudioType }
+  | { type: 'batchStart'; surahNumber: number }
   | { type: 'batchDone'; surahNumber: number }
   | { type: 'delete'; surahNumber?: number }
   | { type: 'sync' };
@@ -225,6 +226,10 @@ class DownloadManager {
   private activeDownloads = new Map<string, DownloadResumableHandle>();
   /** Surahs whose bulk download has been asked to stop; checked between queued jobs. */
   private cancelledSurahs = new Set<number>();
+  /** Surahs with a bulk download currently in flight (auto or manual), so callers
+   *  share one batch instead of starting racing copies of the same surah. */
+  private downloadingSurahs = new Set<number>();
+  private surahDownloadPromises = new Map<number, Promise<SurahDownloadResult>>();
 
   private sharedStoragePermission: { granted: boolean; checkedAt: number } | null = null;
 
@@ -256,7 +261,7 @@ class DownloadManager {
   private getAudioDirectory(): string {
     // Internal app storage holds the working copies used for playback. On Android,
     // completed downloads are ALSO mirrored to shared storage
-    // (/storage/emulated/0/Download/AyatFlow/quran-audio/) so the whole AyatFlow
+    // (/storage/emulated/0/AyatFlow/quran-audio/) so the whole AyatFlow
     // folder is portable: copy it to a new phone and the app restores from it.
     return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
   }
@@ -409,7 +414,7 @@ class DownloadManager {
 
   /**
    * Restore previously downloaded audio from shared storage after a fresh install:
-   * any file found in Download/AyatFlow/quran-audio missing from the app's working
+   * any file found in AyatFlow/quran-audio missing from the app's working
    * directory is copied back and marked as downloaded.
    */
   private async syncWithSharedStorage(): Promise<void> {
@@ -702,6 +707,60 @@ class DownloadManager {
     };
   }
 
+  /** True while a bulk download for this surah is running (auto or manual). */
+  isSurahDownloading(surahNumber: number): boolean {
+    return this.downloadingSurahs.has(surahNumber);
+  }
+
+  /** Surah numbers with a bulk download currently in flight. */
+  getDownloadingSurahs(): Set<number> {
+    return new Set(this.downloadingSurahs);
+  }
+
+  /**
+   * Cheap, cache-backed per-surah download progress (no disk stats). Merges
+   * confirmed downloads with live in-flight progress, so the UI can refresh
+   * itself on every progress event without scanning the filesystem.
+   */
+  getSurahLiveStatus(
+    surahNumber: number,
+    totalAyats: number
+  ): {
+    arabicProgress: number;
+    englishProgress: number;
+    arabicCount: number;
+    englishCount: number;
+    downloadedCount: number;
+    totalProgress: number;
+  } {
+    let arabicTotal = 0;
+    let englishTotal = 0;
+    let arabicDone = 0;
+    let englishDone = 0;
+    let bothDone = 0;
+
+    for (let a = 1; a <= totalAyats; a++) {
+      const arabic = this.statusCache[this.getAudioKey(surahNumber, a, 'arabic')];
+      const english = this.statusCache[this.getAudioKey(surahNumber, a, 'english')];
+      const ap = arabic ? (arabic.downloaded ? 1 : arabic.progress ?? 0) : 0;
+      const ep = english ? (english.downloaded ? 1 : english.progress ?? 0) : 0;
+      arabicTotal += ap;
+      englishTotal += ep;
+      if (ap >= 1) arabicDone++;
+      if (ep >= 1) englishDone++;
+      if (ap >= 1 && ep >= 1) bothDone++;
+    }
+
+    return {
+      arabicProgress: totalAyats > 0 ? arabicTotal / totalAyats : 0,
+      englishProgress: totalAyats > 0 ? englishTotal / totalAyats : 0,
+      arabicCount: arabicDone,
+      englishCount: englishDone,
+      downloadedCount: bothDone,
+      totalProgress: totalAyats > 0 ? (arabicTotal + englishTotal) / (2 * totalAyats) : 0,
+    };
+  }
+
   /** Set of surah numbers that are fully downloaded (both languages, every ayah). */
   getDownloadedSurahs(totalAyatsBySurah: Record<number, number>): Set<number> {
     const result = new Set<number>();
@@ -717,7 +776,7 @@ class DownloadManager {
 
   getStorageLocation(): string {
     if (Platform.OS === 'android') {
-      return `/storage/emulated/0/Download/AyatFlow/quran-audio/`;
+      return `/storage/emulated/0/AyatFlow/quran-audio/`;
     }
     return this.audioDir;
   }
@@ -775,7 +834,8 @@ class DownloadManager {
     surahNumber: number,
     ayahNumber: number,
     type: AudioType,
-    onProgress?: (progress: DownloadProgress) => void
+    onProgress?: (progress: DownloadProgress) => void,
+    force = false
   ): Promise<string> {
     this.assertValidIds(surahNumber, ayahNumber);
     if (!url) {
@@ -791,7 +851,7 @@ class DownloadManager {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
-    const promise = this.downloadAudioInternal(url, surahNumber, ayahNumber, type, onProgress).finally(() => {
+    const promise = this.downloadAudioInternal(url, surahNumber, ayahNumber, type, onProgress, force).finally(() => {
       this.inFlight.delete(key);
       this.activeDownloads.delete(key);
     });
@@ -805,7 +865,8 @@ class DownloadManager {
     surahNumber: number,
     ayahNumber: number,
     type: AudioType,
-    onProgress?: (progress: DownloadProgress) => void
+    onProgress?: (progress: DownloadProgress) => void,
+    force = false
   ): Promise<string> {
     const key = this.getAudioKey(surahNumber, ayahNumber, type);
     const fileName = this.getFileName(surahNumber, ayahNumber, type);
@@ -816,8 +877,16 @@ class DownloadManager {
     const parentDir = filePath.substring(0, filePath.lastIndexOf('/'));
     await FileSystem.makeDirectoryAsync(parentDir, { intermediates: true });
 
-    const existingPath = await this.getLocalAudioPath(surahNumber, ayahNumber, type);
-    if (existingPath) return existingPath;
+    if (!force) {
+      const existingPath = await this.getLocalAudioPath(surahNumber, ayahNumber, type);
+      if (existingPath) return existingPath;
+    } else {
+      // Redownload: drop the old file (and its status) up front so a half-finished
+      // redownload can never be mistaken for a complete download.
+      await FileSystem.deleteAsync(filePath, { idempotent: true });
+      delete this.statusCache[key];
+      this.saveStatusImmediate();
+    }
 
     await FileSystem.deleteAsync(partPath, { idempotent: true });
 
@@ -952,11 +1021,39 @@ class DownloadManager {
   /**
    * Downloads every ayah's audio for a surah, capped at MAX_CONCURRENT_DOWNLOADS in
    * flight at once, and reports a real result instead of silently swallowing failures.
+   *
+   * Batches are coalesced per surah: if a bulk download for the same surah is already
+   * running (auto-started when the surah opened, or from the download manager), this
+   * returns the in-flight batch's promise instead of starting a second, racing copy.
+   * `force` re-downloads every file even if it's already on disk (redownload).
    */
   async downloadSurahAudio(
     surahNumber: number,
     ayahs: Array<{ number: number; audio: string; englishAudio: string }>,
-    onProgress?: (progress: DownloadProgress) => void
+    onProgress?: (progress: DownloadProgress) => void,
+    force = false
+  ): Promise<SurahDownloadResult> {
+    const inFlight = this.surahDownloadPromises.get(surahNumber);
+    if (inFlight) return inFlight;
+
+    this.downloadingSurahs.add(surahNumber);
+    this.emit({ type: 'batchStart', surahNumber });
+
+    const promise = this.downloadSurahAudioInternal(surahNumber, ayahs, onProgress, force).finally(() => {
+      this.downloadingSurahs.delete(surahNumber);
+      this.surahDownloadPromises.delete(surahNumber);
+      this.emit({ type: 'batchDone', surahNumber });
+    });
+
+    this.surahDownloadPromises.set(surahNumber, promise);
+    return promise;
+  }
+
+  private async downloadSurahAudioInternal(
+    surahNumber: number,
+    ayahs: Array<{ number: number; audio: string; englishAudio: string }>,
+    onProgress?: (progress: DownloadProgress) => void,
+    force = false
   ): Promise<SurahDownloadResult> {
     this.cancelledSurahs.delete(surahNumber);
 
@@ -975,7 +1072,7 @@ class DownloadManager {
         return;
       }
       try {
-        await this.downloadAudio(job.url, surahNumber, job.ayahNumber, job.type, onProgress);
+        await this.downloadAudio(job.url, surahNumber, job.ayahNumber, job.type, onProgress, force);
         result.succeeded++;
       } catch (error) {
         result.failed++;
@@ -989,9 +1086,6 @@ class DownloadManager {
     });
 
     this.cancelledSurahs.delete(surahNumber);
-    if (result.succeeded > 0) {
-      this.emit({ type: 'batchDone', surahNumber });
-    }
     return result;
   }
 

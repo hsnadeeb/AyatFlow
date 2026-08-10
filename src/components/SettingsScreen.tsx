@@ -14,7 +14,7 @@ import { getDownloadManager } from "../downloadManager";
 
 type Props = {
   audioPrefs: AudioPrefs;
-  onToggleAudio: (stage: "arabic" | "english") => void;
+  onToggleAudio: (stage: "arabic" | "english" | "tafsir") => void;
   onClose: () => void;
 };
 
@@ -149,6 +149,14 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
             sub="Saheeh International"
             right={
               <Toggle value={audioPrefs.english} onToggle={() => onToggleAudio("english")} />
+            }
+          />
+          <View style={styles.cardDivider} />
+          <Row
+            label="Read tafsir aloud"
+            sub="Commentary voice (Urdu or English)"
+            right={
+              <Toggle value={audioPrefs.tafsir} onToggle={() => onToggleAudio("tafsir")} />
             }
           />
         </View>

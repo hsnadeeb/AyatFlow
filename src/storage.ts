@@ -14,7 +14,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
  *       audio-prefs.json      arabic/english audio toggles
  *       last.json             last read position
  *
- * The whole AyatFlow folder is mirrored to Download/AyatFlow on Android so the
+ * The whole AyatFlow folder is mirrored to AyatFlow on Android so the
  * user can copy it to a new phone and the app restores everything from it.
  * These helpers are the single source of truth — no more AsyncStorage for user
  * data (AsyncStorage is kept only for install metadata and legacy migration).
@@ -45,6 +45,7 @@ export type LastPosition = {
 export type AudioPrefs = {
   arabic: boolean;
   english: boolean;
+  tafsir: boolean;
 };
 
 export function getDataDirectory(): string {
@@ -275,5 +276,17 @@ export async function saveAudioPrefs(prefs: AudioPrefs) {
 }
 
 export async function getAudioPrefs(): Promise<AudioPrefs> {
-  return readJson<AudioPrefs>(FILE_AUDIO_PREFS, { arabic: true, english: true });
+  return readJson<AudioPrefs>(FILE_AUDIO_PREFS, { arabic: true, english: true, tafsir: false });
+}
+
+// ---- Tafsir language (urdu | english) ----
+
+const FILE_TAFSIR_LANGUAGE = "tafsir-language.json";
+
+export async function getTafsirLanguagePreference(): Promise<string> {
+  return readJson<string>(FILE_TAFSIR_LANGUAGE, "urdu");
+}
+
+export async function saveTafsirLanguagePreference(language: string) {
+  await writeJson(FILE_TAFSIR_LANGUAGE, language);
 }

@@ -73,7 +73,6 @@ function AppInner() {
   const [downloadManagerVisible, setDownloadManagerVisible] = useState(false);
   const [downloadManagerSurah, setDownloadManagerSurah] = useState<Surah | null>(null);
   const [restorePromptVisible, setRestorePromptVisible] = useState(false);
-  const [downloading, setDownloading] = useState(false);
   const [downloadingSurahs, setDownloadingSurahs] = useState<Set<number>>(new Set());
   const [downloadedSurahs, setDownloadedSurahs] = useState<Set<number>>(new Set());
   const [shareVisible, setShareVisible] = useState(false);
@@ -217,6 +216,20 @@ function AppInner() {
     return unsubscribe;
   }, [refreshDownloadedSurahs]);
 
+  // Keep the per-surah downloading badges/spinners in sync with the download
+  // manager so a download started from the modal or auto on surah open updates
+  // the same indicators (the manager coalesces both into a single batch anyway).
+  useEffect(() => {
+    const unsubscribe = getDownloadManager().subscribe(() => {
+      setDownloadingSurahs((prev) => {
+        const next = getDownloadManager().getDownloadingSurahs();
+        if (prev.size === next.size && [...prev].every((n) => next.has(n))) return prev;
+        return next;
+      });
+    });
+    return unsubscribe;
+  }, []);
+
   const handleSample = React.useCallback((sample: { channels: { frames: number[] }[] }) => {
     if (stageRef.current === "idle") return;
     const frames = sample.channels[0]?.frames;
@@ -265,27 +278,21 @@ function AppInner() {
   async function startBackgroundDownload(surahNumber: number, ayahs: Ayah[]) {
     const downloadManager = getDownloadManager();
 
+    // If a bulk download for this surah is already running (e.g. the user tapped
+    // "Download All Audio" in the modal), don't start a second racing batch.
+    if (downloadManager.isSurahDownloading(surahNumber)) return;
+
     // Check if surah is already downloaded
     const progress = await downloadManager.getSurahDownloadProgress(surahNumber, ayahs.length);
     if (progress >= 1) {
       return; // Already fully downloaded
     }
 
-    // Start background download without blocking UI
-    setDownloading(true);
-    setDownloadingSurahs((prev) => new Set(prev).add(surahNumber));
-
     try {
+      // Start background download without blocking UI
       await downloadManager.downloadSurahAudio(surahNumber, ayahs);
     } catch (error) {
       // Don't show error to user since this is background
-    } finally {
-      setDownloading(false);
-      setDownloadingSurahs((prev) => {
-        const next = new Set(prev);
-        next.delete(surahNumber);
-        return next;
-      });
     }
   }
 
@@ -430,7 +437,7 @@ function AppInner() {
     });
   }, []);
 
-  const onToggleAudio = useCallback((s: "arabic" | "english") => {
+  const onToggleAudio = useCallback((s: "arabic" | "english" | "tafsir") => {
     playbackController.toggleAudio(s);
   }, []);
 
@@ -565,7 +572,7 @@ function AppInner() {
           bookmarks={bookmarks}
           audioPrefs={audioPrefs}
           glow={glow}
-          downloading={downloading}
+          downloading={downloadingSurahs.size > 0}
           onBack={onBack}
           onTogglePlay={onTogglePlay}
           onPrevious={onPrevious}
@@ -576,6 +583,7 @@ function AppInner() {
           onToggleAudio={onToggleAudio}
           onOpenDownloadManager={onOpenFlowDownloadManager}
           onJumpToAyah={onJumpToAyah}
+          onTafsirContentChange={(text, language) => playbackController.setTafsirContent(text, language)}
         />
         <DownloadManager
           visible={downloadManagerVisible}

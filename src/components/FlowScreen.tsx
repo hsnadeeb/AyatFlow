@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Animated,
   DimensionValue,
+  Easing,
   Modal,
   Pressable,
   ScrollView,
@@ -19,16 +20,20 @@ import {
   TafsirLanguage,
   getTafsirForAyah,
 } from "../tafsirService";
+import {
+  getTafsirLanguagePreference,
+  saveTafsirLanguagePreference,
+} from "../storage";
 
 type Props = {
   surah: Surah;
   ayahs: Ayah[];
   index: number;
-  stage: "idle" | "arabic" | "english";
+  stage: "idle" | "arabic" | "english" | "tafsir";
   playing: boolean;
   speed: number;
   bookmarks: string[];
-  audioPrefs: { arabic: boolean; english: boolean };
+  audioPrefs: { arabic: boolean; english: boolean; tafsir: boolean };
   glow: Animated.Value;
   downloading: boolean;
   onBack: () => void;
@@ -38,12 +43,25 @@ type Props = {
   onRepeat: () => void;
   onSpeed: (speed: number) => void;
   onBookmark: () => void;
-  onToggleAudio: (stage: "arabic" | "english") => void;
+  onToggleAudio: (stage: "arabic" | "english" | "tafsir") => void;
   onOpenDownloadManager: () => void;
   onJumpToAyah: (index: number) => void;
+  /**
+   * Called whenever the tafsir drawer's visible content changes — opened,
+   * closed, finished loading, or the language tab switched. Pass this
+   * straight through to `playbackController.setTafsirContent`; it's how the
+   * playback engine knows what (if anything) to read aloud once it reaches
+   * the tafsir stage.
+   */
+  onTafsirContentChange?: (text: string | null, language: TafsirLanguage) => void;
 };
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
+
+// Ornamental Quranic ayah-end brackets — a small, authentic signature detail
+// rather than a generic numeral badge.
+const AYAH_OPEN = "\uFD3E";
+const AYAH_CLOSE = "\uFD3F";
 
 function AudioToggle({
   icon,
@@ -96,12 +114,13 @@ const FlowScreen = React.memo(function FlowScreen({
   onToggleAudio,
   onOpenDownloadManager,
   onJumpToAyah,
+  onTafsirContentChange,
 }: Props) {
   const insets = useSafeAreaInsets();
   const styles = useThemedStyles(createStyles);
   const { palette: c } = useTheme();
   const currentAyah = ayahs[index];
-  const arabicGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 7] });
+  const arabicGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 9] });
   const englishGlow = glow.interpolate({ inputRange: [0, 1], outputRange: [0, 6] });
   const dotOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1] });
 
@@ -111,15 +130,34 @@ const FlowScreen = React.memo(function FlowScreen({
   const [atBottom, setAtBottom] = useState(true);
   const contentScrollRef = useRef<ScrollView>(null);
 
-  // Tafsir view state.
-  const [tafsirVisible, setTafsirVisible] = useState(false);
+  // Tafsir now lives inline, as a commentary drawer beneath the translation,
+  // instead of a separate modal — Arabic, meaning, and commentary read as
+  // one continuous column.
+  const [tafsirOpen, setTafsirOpen] = useState(false);
   const [tafsirLanguage, setTafsirLanguage] = useState<TafsirLanguage>("urdu");
   const [tafsirText, setTafsirText] = useState<string | null>(null);
   const [tafsirLoading, setTafsirLoading] = useState(false);
   const [tafsirError, setTafsirError] = useState(false);
+  const tafsirAnim = useRef(new Animated.Value(0)).current;
+
+  // Remember the chosen commentary language (Urdu/English) across sessions.
+  useEffect(() => {
+    getTafsirLanguagePreference()
+      .then((saved) => {
+        if (saved === "urdu" || saved === "english") setTafsirLanguage(saved);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    saveTafsirLanguagePreference(tafsirLanguage).catch(() => {});
+  }, [tafsirLanguage]);
 
   const loadTafsir = useCallback(async () => {
-    if (!tafsirVisible) return;
+    // Load whenever the drawer is open OR read-aloud is enabled, so the
+    // playback engine always has the current ayah's text to speak — even
+    // when the drawer is closed.
+    if (!tafsirOpen && !audioPrefs.tafsir) return;
     setTafsirLoading(true);
     setTafsirError(false);
     try {
@@ -131,16 +169,50 @@ const FlowScreen = React.memo(function FlowScreen({
     } finally {
       setTafsirLoading(false);
     }
-  }, [tafsirVisible, surah.number, currentAyah.numberInSurah, tafsirLanguage]);
+  }, [tafsirOpen, audioPrefs.tafsir, surah.number, currentAyah.numberInSurah, tafsirLanguage]);
 
   useEffect(() => {
-    if (tafsirVisible) loadTafsir();
-  }, [tafsirVisible, loadTafsir]);
+    if (tafsirOpen || audioPrefs.tafsir) loadTafsir();
+  }, [tafsirOpen, audioPrefs.tafsir, loadTafsir]);
 
-  // Reset the reading scroll position whenever the ayah changes (prev/next/jump).
+  // Keep the playback engine's notion of "what tafsir text is available to
+  // read aloud" in lockstep with the current ayah — never speak stale text,
+  // loading state, or an error message. The drawer itself is optional: when
+  // read-aloud is on, the flow continues ayah by ayah whether it's open or not.
+  useEffect(() => {
+    const speakable = audioPrefs.tafsir && !tafsirLoading && !tafsirError ? tafsirText : null;
+    onTafsirContentChange?.(speakable, tafsirLanguage);
+  }, [audioPrefs.tafsir, tafsirLoading, tafsirError, tafsirText, tafsirLanguage, onTafsirContentChange]);
+
+  function toggleTafsir() {
+    const opening = !tafsirOpen;
+    setTafsirOpen(opening);
+    tafsirAnim.setValue(opening ? 0 : 1);
+    if (opening) {
+      Animated.timing(tafsirAnim, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+      // Bring the newly revealed commentary into view without yanking the
+      // reader away from the verse they were just looking at.
+      requestAnimationFrame(() => {
+        contentScrollRef.current?.scrollToEnd({ animated: true });
+      });
+    }
+  }
+
+  // Reset the reading scroll position and collapse the commentary drawer
+  // whenever the ayah changes (prev/next/jump) — every ayah starts fresh.
+  // The tafsir text is cleared too so the playback engine never speaks the
+  // previous ayah's commentary for the new ayah while it loads.
   useEffect(() => {
     contentScrollRef.current?.scrollTo({ y: 0, animated: false });
     setAtBottom(true);
+    setTafsirOpen(false);
+    setTafsirText(null);
+    tafsirAnim.setValue(0);
   }, [index]);
 
   const isBookmarked = bookmarks.includes(`${surah.number}:${currentAyah.numberInSurah}`);
@@ -151,7 +223,9 @@ const FlowScreen = React.memo(function FlowScreen({
       ? { text: "Reciting", color: c.accent }
       : stage === "english"
         ? { text: "Meaning", color: c.accent2 }
-        : { text: "Paused", color: c.muted };
+        : stage === "tafsir"
+          ? { text: "Commentary", color: c.ink }
+          : { text: "Paused", color: c.muted };
 
   const jumpNumber = parseInt(jumpText, 10);
   const canJump = Number.isInteger(jumpNumber) && jumpNumber >= 1 && jumpNumber <= ayahs.length;
@@ -201,14 +275,6 @@ const FlowScreen = React.memo(function FlowScreen({
             )}
             <Pressable
               style={styles.iconBtn}
-              onPress={() => setTafsirVisible(true)}
-              hitSlop={6}
-              accessibilityLabel="Tafsir"
-            >
-              <Text style={styles.tafsirGlyph}>📖</Text>
-            </Pressable>
-            <Pressable
-              style={styles.iconBtn}
               onPress={onBookmark}
               hitSlop={6}
               accessibilityLabel={isBookmarked ? "Remove bookmark" : "Bookmark ayat"}
@@ -246,6 +312,14 @@ const FlowScreen = React.memo(function FlowScreen({
             onText={c.accent2}
             onToggle={() => onToggleAudio("english")}
           />
+          <AudioToggle
+            icon="🗣"
+            label="Read tafsir aloud"
+            value={audioPrefs.tafsir}
+            onBg={c.well}
+            onText={c.ink}
+            onToggle={() => onToggleAudio("tafsir")}
+          />
           <View style={[styles.stagePill, { backgroundColor: stageStatus.color }]}>
             <Animated.View
               style={[styles.stageDot, { opacity: stage === "idle" ? 0.55 : dotOpacity }]}
@@ -255,7 +329,7 @@ const FlowScreen = React.memo(function FlowScreen({
         </View>
       </View>
 
-      {/* ---------- The one true scroll region: the ayah itself ---------- */}
+      {/* ---------- The one true scroll region: Arabic → meaning → commentary ---------- */}
       <View style={styles.readerWrap}>
         <ScrollView
           ref={contentScrollRef}
@@ -265,39 +339,151 @@ const FlowScreen = React.memo(function FlowScreen({
           onScroll={handleScroll}
           scrollEventThrottle={32}
         >
-          <Animated.Text
-            selectable
-            style={[
-              styles.arabic,
-              {
-                textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
-                textShadowRadius: arabicGlow,
-              },
-            ]}
-          >
-            {currentAyah.text}
-          </Animated.Text>
+          <View style={styles.arabicCard}>
+            <Animated.Text
+              selectable
+              style={[
+                styles.arabic,
+                {
+                  textShadowColor: stage === "arabic" ? c.accentGlow : "transparent",
+                  textShadowRadius: arabicGlow,
+                },
+              ]}
+            >
+              {currentAyah.text}
+              <Text style={styles.ayahMarker}>
+                {" "}
+                {AYAH_OPEN}
+                {currentAyah.numberInSurah}
+                {AYAH_CLOSE}
+              </Text>
+            </Animated.Text>
+          </View>
 
-          <View style={styles.divider} />
+          <View style={styles.seam}>
+            <View style={styles.seamLine} />
+            <View style={styles.seamMark} />
+            <View style={styles.seamLine} />
+          </View>
 
-          <Animated.Text
-            selectable
-            style={[
-              styles.translation,
-              {
-                textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
-                textShadowRadius: englishGlow,
-              },
-            ]}
-          >
-            {currentAyah.translation}
-          </Animated.Text>
+          <View style={styles.translationBlock}>
+            <View style={styles.translationRail} />
+            <Animated.Text
+              selectable
+              style={[
+                styles.translation,
+                {
+                  textShadowColor: stage === "english" ? c.accent2Glow : "transparent",
+                  textShadowRadius: englishGlow,
+                },
+              ]}
+            >
+              {currentAyah.translation}
+            </Animated.Text>
+          </View>
+
+          {/* ---------- Inline commentary drawer ---------- */}
+          <View style={styles.tafsirSection}>
+            <Pressable
+              onPress={toggleTafsir}
+              style={styles.tafsirToggle}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: tafsirOpen }}
+              accessibilityLabel={tafsirOpen ? "Hide tafsir" : "Show tafsir"}
+            >
+              <Text style={styles.tafsirToggleIcon}>📖</Text>
+              <Text style={styles.tafsirToggleText}>
+                {tafsirOpen ? "Hide commentary" : "Tafsir · commentary on this ayat"}
+              </Text>
+              <Text style={[styles.tafsirChevron, tafsirOpen && styles.tafsirChevronOpen]}>
+                ⌄
+              </Text>
+            </Pressable>
+
+            {tafsirOpen && (
+              <Animated.View
+                style={[
+                  styles.tafsirPanel,
+                  {
+                    opacity: tafsirAnim,
+                    transform: [
+                      {
+                        translateY: tafsirAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [8, 0],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <View style={styles.tafsirTabs}>
+                  {(["urdu", "english"] as const).map((lang) => (
+                    <Pressable
+                      key={lang}
+                      onPress={() => setTafsirLanguage(lang)}
+                      style={[styles.tafsirTab, tafsirLanguage === lang && styles.tafsirTabActive]}
+                      accessibilityRole="tab"
+                      accessibilityState={{ selected: tafsirLanguage === lang }}
+                    >
+                      <Text
+                        style={[
+                          styles.tafsirTabText,
+                          tafsirLanguage === lang && styles.tafsirTabTextActive,
+                        ]}
+                      >
+                        {lang === "urdu" ? "اردو" : "English"}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {tafsirLoading ? (
+                  <View style={styles.tafsirStateBox}>
+                    <ActivityIndicator size="small" color={c.accent} />
+                    <Text style={styles.tafsirStateText}>Loading tafsir…</Text>
+                  </View>
+                ) : tafsirError ? (
+                  <View style={styles.tafsirStateBox}>
+                    <Text style={styles.tafsirStateText}>
+                      Couldn't load tafsir. Check your connection.
+                    </Text>
+                    <Pressable style={styles.tafsirRetryBtn} onPress={() => loadTafsir()} hitSlop={6}>
+                      <Text style={styles.tafsirRetryText}>Retry</Text>
+                    </Pressable>
+                  </View>
+                ) : tafsirText === null ? (
+                  <View style={styles.tafsirStateBox}>
+                    <Text style={styles.tafsirStateText}>No tafsir is available for this ayah.</Text>
+                  </View>
+                ) : (
+                  <Animated.Text
+                    selectable
+                    style={[
+                      styles.tafsirText,
+                      tafsirLanguage === "urdu" && styles.tafsirTextUrdu,
+                      {
+                        textShadowColor: stage === "tafsir" ? c.accentGlow : "transparent",
+                        textShadowRadius: stage === "tafsir" ? englishGlow : 0,
+                      },
+                    ]}
+                  >
+                    {tafsirText}
+                  </Animated.Text>
+                )}
+
+                <Text style={styles.tafsirAttribution}>
+                  {TAFSIR_EDITIONS[tafsirLanguage].name} · {TAFSIR_EDITIONS[tafsirLanguage].author}
+                </Text>
+              </Animated.View>
+            )}
+          </View>
         </ScrollView>
 
-        {/* Soft fade + hint that content continues, only while not scrolled to bottom */}
+        {/* Soft fade hinting content continues, only while not scrolled to bottom */}
         {!atBottom && (
           <View pointerEvents="none" style={styles.readerFade}>
-            <View style={styles.readerFadeInner} />
+            <View style={styles.readerFadeGradient} />
           </View>
         )}
       </View>
@@ -411,16 +597,6 @@ const FlowScreen = React.memo(function FlowScreen({
               style={styles.sheetRow}
               onPress={() => {
                 setMoreVisible(false);
-                setTafsirVisible(true);
-              }}
-            >
-              <Text style={styles.sheetRowText}>📖 Tafsir</Text>
-            </Pressable>
-
-            <Pressable
-              style={styles.sheetRow}
-              onPress={() => {
-                setMoreVisible(false);
                 onOpenDownloadManager();
               }}
             >
@@ -430,83 +606,6 @@ const FlowScreen = React.memo(function FlowScreen({
             <Text style={styles.sourceNote}>
               Uthmani script · Mishary Alafasy recitation{"\n"}
               Saheeh International · English: Ibrahim Walk
-            </Text>
-          </Pressable>
-        </Pressable>
-      </Modal>
-
-      {/* ---------- Tafsir bottom sheet ---------- */}
-      <Modal
-        transparent
-        visible={tafsirVisible}
-        animationType="slide"
-        onRequestClose={() => setTafsirVisible(false)}
-      >
-        <Pressable style={styles.sheetOverlay} onPress={() => setTafsirVisible(false)}>
-          <Pressable style={styles.tafsirSheet} onPress={(e) => e.stopPropagation()}>
-            <View style={styles.sheetHandle} />
-
-            <View style={styles.tafsirHeader}>
-              <View style={styles.tafsirHeaderText}>
-                <Text style={styles.tafsirTitle}>📖 Tafsir</Text>
-                <Text style={styles.tafsirSubtitle}>
-                  {surah.englishName} · Ayat {currentAyah.numberInSurah}
-                </Text>
-              </View>
-              <Pressable
-                style={styles.tafsirCloseBtn}
-                onPress={() => setTafsirVisible(false)}
-                hitSlop={6}
-                accessibilityLabel="Close tafsir"
-              >
-                <Text style={styles.tafsirCloseGlyph}>✕</Text>
-              </Pressable>
-            </View>
-
-            <View style={styles.tafsirTabs}>
-              {(["urdu", "english"] as const).map((lang) => (
-                <Pressable
-                  key={lang}
-                  onPress={() => setTafsirLanguage(lang)}
-                  style={[styles.tafsirTab, tafsirLanguage === lang && styles.tafsirTabActive]}
-                  accessibilityRole="tab"
-                  accessibilityState={{ selected: tafsirLanguage === lang }}
-                >
-                  <Text
-                    style={[styles.tafsirTabText, tafsirLanguage === lang && styles.tafsirTabTextActive]}
-                  >
-                    {lang === "urdu" ? "اردو" : "English"}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-
-            {tafsirLoading ? (
-              <View style={styles.tafsirStateBox}>
-                <ActivityIndicator size="small" color={c.accent} />
-                <Text style={styles.tafsirStateText}>Loading tafsir…</Text>
-              </View>
-            ) : tafsirError ? (
-              <View style={styles.tafsirStateBox}>
-                <Text style={styles.tafsirStateText}>Couldn't load tafsir. Check your connection.</Text>
-                <Pressable style={styles.tafsirRetryBtn} onPress={() => loadTafsir()} hitSlop={6}>
-                  <Text style={styles.tafsirRetryText}>Retry</Text>
-                </Pressable>
-              </View>
-            ) : tafsirText === null ? (
-              <View style={styles.tafsirStateBox}>
-                <Text style={styles.tafsirStateText}>No tafsir is available for this ayah.</Text>
-              </View>
-            ) : (
-              <ScrollView style={styles.tafsirScroll} showsVerticalScrollIndicator={false}>
-                <Text style={[styles.tafsirText, tafsirLanguage === "urdu" && styles.tafsirTextUrdu]}>
-                  {tafsirText}
-                </Text>
-              </ScrollView>
-            )}
-
-            <Text style={styles.tafsirAttribution}>
-              {TAFSIR_EDITIONS[tafsirLanguage].name} · {TAFSIR_EDITIONS[tafsirLanguage].author}
             </Text>
           </Pressable>
         </Pressable>
@@ -561,9 +660,6 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     starActive: {
       color: c.accent,
     },
-    tafsirGlyph: {
-      fontSize: 16,
-    },
     headerCenter: {
       flex: 1,
       alignItems: "center",
@@ -587,6 +683,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       fontSize: 16,
       fontWeight: "700",
       color: c.ink,
+      letterSpacing: 0.2,
     },
     progressLabel: {
       fontSize: 11,
@@ -664,7 +761,7 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       fontWeight: "600",
     },
 
-    // ---- Reader: the single scrollable ayah area ----
+    // ---- Reader: Arabic → seam → meaning → commentary, one flowing column ----
     readerWrap: {
       flex: 1,
       minHeight: 0,
@@ -673,27 +770,179 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       flex: 1,
     },
     readerContent: {
-      paddingHorizontal: 24,
-      paddingTop: 28,
-      paddingBottom: 40,
+      paddingHorizontal: 20,
+      paddingTop: 24,
+      paddingBottom: 44,
+    },
+
+    arabicCard: {
+      backgroundColor: c.well,
+      borderRadius: radii.card,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      paddingHorizontal: 20,
+      paddingVertical: 26,
     },
     arabic: {
-      fontSize: 32,
-      lineHeight: 58,
+      fontSize: 30,
+      lineHeight: 56,
       textAlign: "right",
       color: c.ink,
       fontWeight: "500",
     },
-    divider: {
-      height: 1,
+    ayahMarker: {
+      fontSize: 17,
+      color: c.accent,
+      fontWeight: "600",
+    },
+
+    // A quiet ornamental seam between the recitation and its meaning —
+    // a nod to the circular ayah-end marks used in printed Qurans.
+    seam: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginVertical: 18,
+      paddingHorizontal: 4,
+    },
+    seamLine: {
+      flex: 1,
+      height: StyleSheet.hairlineWidth,
       backgroundColor: c.line,
-      marginVertical: 22,
+    },
+    seamMark: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: c.accent2,
+      marginHorizontal: 10,
+    },
+
+    translationBlock: {
+      flexDirection: "row",
+      paddingRight: 4,
+    },
+    translationRail: {
+      width: 3,
+      borderRadius: 1.5,
+      backgroundColor: c.accent2Soft,
+      marginRight: 16,
     },
     translation: {
-      fontSize: 17.5,
-      lineHeight: 29,
+      flex: 1,
+      fontSize: 17,
+      lineHeight: 28,
       color: c.inkSoft,
     },
+
+    // ---- Inline tafsir / commentary drawer ----
+    tafsirSection: {
+      marginTop: 30,
+    },
+    tafsirToggle: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      borderRadius: radii.control,
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+      gap: 10,
+    },
+    tafsirToggleIcon: {
+      fontSize: 15,
+    },
+    tafsirToggleText: {
+      flex: 1,
+      fontSize: 13.5,
+      fontWeight: "600",
+      color: c.inkSoft,
+    },
+    tafsirChevron: {
+      fontSize: 15,
+      color: c.muted,
+      transform: [{ rotate: "0deg" }],
+    },
+    tafsirChevronOpen: {
+      transform: [{ rotate: "180deg" }],
+    },
+    tafsirPanel: {
+      marginTop: 12,
+      backgroundColor: c.surface,
+      borderRadius: radii.control,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.line,
+      padding: 18,
+    },
+    tafsirTabs: {
+      flexDirection: "row",
+      alignSelf: "flex-start",
+      backgroundColor: c.well,
+      borderRadius: radii.control,
+      borderWidth: 1,
+      borderColor: c.line,
+      padding: 3,
+      gap: 2,
+      marginBottom: 16,
+    },
+    tafsirTab: {
+      minWidth: 76,
+      alignItems: "center",
+      paddingVertical: 7,
+      paddingHorizontal: 12,
+      borderRadius: radii.control - 8,
+    },
+    tafsirTabActive: {
+      backgroundColor: c.ink,
+    },
+    tafsirTabText: {
+      color: c.muted,
+      fontSize: 12.5,
+      fontWeight: "600",
+    },
+    tafsirTabTextActive: {
+      color: c.bg,
+    },
+    tafsirText: {
+      fontSize: 15,
+      lineHeight: 24,
+      color: c.inkSoft,
+    },
+    tafsirTextUrdu: {
+      textAlign: "right",
+      fontSize: 16.5,
+      lineHeight: 30,
+      color: c.ink,
+    },
+    tafsirStateBox: {
+      alignItems: "center",
+      paddingVertical: 24,
+      gap: 12,
+    },
+    tafsirStateText: {
+      fontSize: 13.5,
+      color: c.muted,
+      textAlign: "center",
+      lineHeight: 20,
+    },
+    tafsirRetryBtn: {
+      backgroundColor: c.accent,
+      borderRadius: radii.control,
+      paddingVertical: 10,
+      paddingHorizontal: 28,
+    },
+    tafsirRetryText: {
+      color: c.onAccent,
+      fontSize: 14,
+      fontWeight: "700",
+    },
+    tafsirAttribution: {
+      textAlign: "center",
+      color: c.muted,
+      fontSize: 11,
+      marginTop: 16,
+    },
+
     readerFade: {
       position: "absolute",
       left: 0,
@@ -701,10 +950,10 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       bottom: 0,
       height: 36,
     },
-    readerFadeInner: {
+    readerFadeGradient: {
       flex: 1,
       backgroundColor: c.bg,
-      opacity: 0.001, // placeholder layer; real fade handled by shadow below
+      opacity: 0.001, // placeholder layer; real fade handled by native shadow/gradient if added
     },
 
     // ---- Bottom playback bar ----
@@ -913,125 +1162,6 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       fontSize: 11,
       lineHeight: 17,
       marginTop: 20,
-    },
-
-    // ---- Tafsir bottom sheet ----
-    tafsirSheet: {
-      backgroundColor: c.surface,
-      borderTopLeftRadius: radii.card,
-      borderTopRightRadius: radii.card,
-      paddingHorizontal: 24,
-      paddingTop: 12,
-      paddingBottom: 28,
-      borderWidth: 1,
-      borderColor: c.line,
-      borderBottomWidth: 0,
-      maxHeight: "88%",
-    },
-    tafsirHeader: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      marginBottom: 14,
-    },
-    tafsirHeaderText: {
-      flex: 1,
-    },
-    tafsirTitle: {
-      fontSize: 18,
-      fontWeight: "700",
-      color: c.ink,
-    },
-    tafsirSubtitle: {
-      fontSize: 12.5,
-      color: c.muted,
-      marginTop: 3,
-    },
-    tafsirCloseBtn: {
-      width: 34,
-      height: 34,
-      borderRadius: 17,
-      backgroundColor: c.well,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: c.line,
-      justifyContent: "center",
-      alignItems: "center",
-      marginLeft: 12,
-    },
-    tafsirCloseGlyph: {
-      fontSize: 14,
-      fontWeight: "700",
-      color: c.inkSoft,
-    },
-    tafsirTabs: {
-      flexDirection: "row",
-      backgroundColor: c.well,
-      borderRadius: radii.control,
-      borderWidth: 1,
-      borderColor: c.line,
-      padding: 4,
-      gap: 2,
-      marginBottom: 16,
-    },
-    tafsirTab: {
-      flex: 1,
-      alignItems: "center",
-      paddingVertical: 9,
-      borderRadius: radii.control - 8,
-    },
-    tafsirTabActive: {
-      backgroundColor: c.ink,
-    },
-    tafsirTabText: {
-      color: c.muted,
-      fontSize: 13,
-      fontWeight: "600",
-    },
-    tafsirTabTextActive: {
-      color: c.bg,
-    },
-    tafsirScroll: {
-      flexGrow: 0,
-      flexShrink: 1,
-    },
-    tafsirText: {
-      fontSize: 15,
-      lineHeight: 24,
-      color: c.inkSoft,
-    },
-    tafsirTextUrdu: {
-      textAlign: "right",
-      fontSize: 16.5,
-      lineHeight: 30,
-      color: c.ink,
-    },
-    tafsirStateBox: {
-      alignItems: "center",
-      paddingVertical: 36,
-      gap: 12,
-    },
-    tafsirStateText: {
-      fontSize: 13.5,
-      color: c.muted,
-      textAlign: "center",
-      lineHeight: 20,
-    },
-    tafsirRetryBtn: {
-      backgroundColor: c.accent,
-      borderRadius: radii.control,
-      paddingVertical: 10,
-      paddingHorizontal: 28,
-    },
-    tafsirRetryText: {
-      color: c.onAccent,
-      fontSize: 14,
-      fontWeight: "700",
-    },
-    tafsirAttribution: {
-      textAlign: "center",
-      color: c.muted,
-      fontSize: 11,
-      marginTop: 16,
     },
   });
 }

@@ -10,7 +10,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { getDownloadManager, DownloadProgress, AudioType } from "../downloadManager";
+import { getDownloadManager, AudioType } from "../downloadManager";
 import { Surah, Ayah } from "../api";
 import { radii, useTheme, useThemedStyles } from "../theme";
 
@@ -56,9 +56,6 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
 
   // Confirmed-on-disk per-ayah progress, populated by loadExistingProgress.
   const confirmedRef = useRef<Record<number, { arabic: number; english: number }>>({});
-  // Live progress during an active download, keyed by `${ayahNumber}:${type}` so
-  // arabic and english updates for the same ayah never clobber each other.
-  const liveRef = useRef<Record<string, number>>({});
 
   const isMountedRef = useRef(true);
   const currentSurahNumberRef = useRef<number | null>(null);
@@ -86,7 +83,7 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
   }, [downloadManager]);
 
   // Recomputes both language bars and the overall total from confirmed on-disk
-  // state (confirmedRef) overlaid with live in-flight progress (liveRef).
+  // state (confirmedRef).
   const applyProgress = useCallback(() => {
     if (!isMountedRef.current) return;
     const n = ayahs.length;
@@ -100,10 +97,8 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
 
     for (const ayah of ayahs) {
       const confirmed = confirmedRef.current[ayah.number];
-      const liveA = liveRef.current[`${ayah.number}:arabic`];
-      const liveE = liveRef.current[`${ayah.number}:english`];
-      const a = liveA ?? confirmed?.arabic ?? 0;
-      const e = liveE ?? confirmed?.english ?? 0;
+      const a = confirmed?.arabic ?? 0;
+      const e = confirmed?.english ?? 0;
       arabicTotal += a;
       englishTotal += e;
       if (a >= 1) arabicDone++;
@@ -118,6 +113,25 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
     setDownloadedCount(bothDone);
     setTotalProgress((arabicTotal + englishTotal) / (2 * n));
   }, [ayahs]);
+
+  // Cheap, cache-backed refresh driven by download-manager events while a
+  // download is in flight (throttled — progress events can arrive frequently).
+  const lastLiveRefreshAtRef = useRef(0);
+  const refreshLiveProgress = useCallback(() => {
+    if (!surah || ayahs.length === 0) return;
+    const now = Date.now();
+    if (now - lastLiveRefreshAtRef.current < 500) return;
+    lastLiveRefreshAtRef.current = now;
+    const status = downloadManager.getSurahLiveStatus(surah.number, ayahs.length);
+    if (isMountedRef.current) {
+      setArabicProgress(status.arabicProgress);
+      setEnglishProgress(status.englishProgress);
+      setArabicCount(status.arabicCount);
+      setEnglishCount(status.englishCount);
+      setDownloadedCount(status.downloadedCount);
+      setTotalProgress(status.totalProgress);
+    }
+  }, [downloadManager, surah, ayahs]);
 
   const loadExistingProgress = useCallback(async () => {
     if (!surah || ayahs.length === 0) return;
@@ -135,7 +149,6 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
     if (!isMountedRef.current || currentSurahNumberRef.current !== surahNumber) return;
 
     confirmedRef.current = {};
-    liveRef.current = {};
     for (const r of perAyah) {
       confirmedRef.current[r.ayahNumber] = { arabic: r.arabic, english: r.english };
     }
@@ -150,17 +163,28 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
   // (a full disk scan per single file would be too heavy on long surahs).
   useEffect(() => {
     const unsubscribe = downloadManager.subscribe((event) => {
+      const forThisSurah = !!surah && event.type !== "sync" && event.surahNumber === surah.number;
+      if (forThisSurah) {
+        // Download started elsewhere (auto on surah open) or settled — keep the
+        // button state (Cancel vs Download) and the spinner honest.
+        setIsDownloading(downloadManager.isSurahDownloading(surah.number));
+      }
       if (event.type === "progress" || event.type === "fileComplete") {
+        if (forThisSurah) refreshLiveProgress();
         refreshStorage();
-      } else if (event.type === "batchDone" || event.type === "delete") {
-        if (surah && event.surahNumber === surah.number) {
-          loadExistingProgress();
-        }
+      } else if (event.type === "batchDone" || event.type === "delete" || event.type === "sync") {
+        if (forThisSurah) loadExistingProgress();
         refreshStorage();
       }
     });
     return unsubscribe;
-  }, [downloadManager, surah, refreshStorage, loadExistingProgress]);
+  }, [downloadManager, surah, refreshStorage, loadExistingProgress, refreshLiveProgress]);
+
+  // Reflect downloads in flight for this surah (auto-started or from the modal)
+  // as soon as the modal opens.
+  useEffect(() => {
+    setIsDownloading(!!surah && downloadManager.isSurahDownloading(surah.number));
+  }, [visible, surah, downloadManager]);
 
   useEffect(() => {
     if (visible && surah && ayahs.length > 0) {
@@ -177,53 +201,64 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
     return () => clearInterval(interval);
   }, [isDownloading, refreshStorage]);
 
-  const handleDownload = useCallback(async () => {
-    if (!surah || isDownloading) return;
-    const surahNumber = surah.number;
+  const handleDownload = useCallback(
+    async (force = false) => {
+      if (!surah || isDownloading) return;
+      const surahNumber = surah.number;
 
-    currentSurahNumberRef.current = surahNumber;
-    liveRef.current = {};
-    setIsDownloading(true);
+      currentSurahNumberRef.current = surahNumber;
 
-    try {
-      const result = await downloadManager.downloadSurahAudio(
-        surahNumber,
-        ayahs,
-        (progress: DownloadProgress) => {
-          // Ignore stale callbacks if the user switched surahs mid-download.
-          if (currentSurahNumberRef.current !== surahNumber) return;
-          liveRef.current[`${progress.ayahNumber}:${progress.type}`] = progress.progress;
-          applyProgress();
+      try {
+        const result = await downloadManager.downloadSurahAudio(
+          surahNumber,
+          ayahs,
+          () => {
+            // Ignore stale callbacks if the user switched surahs mid-download.
+            if (currentSurahNumberRef.current !== surahNumber) return;
+            refreshLiveProgress();
+          },
+          force
+        );
+
+        if (currentSurahNumberRef.current === surahNumber) {
+          // Refresh from actual on-disk state rather than trusting the in-memory
+          // tally — this is the source of truth for what's really downloaded.
+          await loadExistingProgress();
+          refreshStorage();
+
+          if (!result.cancelled && result.failed > 0) {
+            Alert.alert(
+              "Some files didn't download",
+              `${result.failed} of ${result.succeeded + result.failed} files failed. Tap "Resume Download" to retry the missing ones.`
+            );
+          }
         }
-      );
-
-      if (currentSurahNumberRef.current === surahNumber) {
-        // Refresh from actual on-disk state rather than trusting the in-memory
-        // tally — this is the source of truth for what's really downloaded.
-        await loadExistingProgress();
-        refreshStorage();
-
-        if (!result.cancelled && result.failed > 0) {
-          Alert.alert(
-            "Some files didn't download",
-            `${result.failed} of ${result.succeeded + result.failed} files failed. Tap "Resume Download" to retry the missing ones.`
-          );
+      } catch (error) {
+        console.error("Download failed:", error);
+        if (isMountedRef.current) {
+          Alert.alert("Download Failed", "Something went wrong while downloading audio.");
         }
       }
-    } catch (error) {
-      console.error("Download failed:", error);
-      if (isMountedRef.current) {
-        Alert.alert("Download Failed", "Something went wrong while downloading audio.");
-      }
-    } finally {
-      if (isMountedRef.current) setIsDownloading(false);
-    }
-  }, [surah, ayahs, isDownloading, downloadManager, applyProgress, refreshStorage, loadExistingProgress]);
+    },
+    [surah, ayahs, isDownloading, downloadManager, refreshLiveProgress, loadExistingProgress, refreshStorage]
+  );
+
+  const handleRedownload = useCallback(() => {
+    if (!surah) return;
+    Alert.alert(
+      "Redownload audio?",
+      `This re-downloads all ${surah.englishName} audio, replacing the current files on this device.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Redownload", onPress: () => handleDownload(true) },
+      ]
+    );
+  }, [surah, handleDownload]);
 
   const handleCancelDownload = useCallback(() => {
     if (!surah) return;
     // Flags the batch to stop; jobs already in flight finish, queued ones are
-    // skipped. handleDownload's own finally{} clears isDownloading once it settles.
+    // skipped. isDownloading clears once the batch settles (batchDone event).
     downloadManager.cancelSurahDownload(surah.number);
   }, [surah, downloadManager]);
 
@@ -242,7 +277,6 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
               await downloadManager.deleteSurahAudio(surah.number, ayahs.length);
               if (!isMountedRef.current) return;
               confirmedRef.current = {};
-              liveRef.current = {};
               setArabicProgress(0);
               setEnglishProgress(0);
               setArabicCount(0);
@@ -360,7 +394,7 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
             ) : (
               <>
                 {!allDone && (
-                  <Pressable style={styles.downloadBtn} onPress={handleDownload} accessibilityRole="button">
+                  <Pressable style={styles.downloadBtn} onPress={() => handleDownload()} accessibilityRole="button">
                     <Text style={styles.downloadBtnText}>
                       {downloadedCount > 0 ? "Resume Download" : "Download All Audio"}
                     </Text>
@@ -372,6 +406,11 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
                     <Pressable style={styles.shareBtn} onPress={() => handleShare(["arabic", "english"])} accessibilityRole="button">
                       <Text style={styles.shareBtnText}>Share Audio</Text>
                     </Pressable>
+                    {allDone && (
+                      <Pressable style={styles.reDownloadBtn} onPress={handleRedownload} accessibilityRole="button">
+                        <Text style={styles.reDownloadBtnText}>Redownload Audio</Text>
+                      </Pressable>
+                    )}
                     <Pressable style={styles.deleteBtn} onPress={handleDelete} accessibilityRole="button">
                       <Text style={styles.deleteBtnText}>Delete Downloaded Audio</Text>
                     </Pressable>
@@ -637,6 +676,20 @@ function createStyles(t: ReturnType<typeof useTheme>) {
       alignItems: "center",
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: c.line,
+    },
+    reDownloadBtn: {
+      backgroundColor: c.surface,
+      borderRadius: radii.card,
+      paddingVertical: 16,
+      paddingHorizontal: 24,
+      alignItems: "center",
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.accentBorder,
+    },
+    reDownloadBtnText: {
+      color: c.accent,
+      fontSize: 16,
+      fontWeight: "600",
     },
     downloadBtnText: {
       color: c.onAccent,

@@ -2,6 +2,7 @@ import { createAudioPlayer, setAudioModeAsync, AudioPlayer } from "expo-audio";
 import * as Speech from "expo-speech";
 import * as FileSystem from "expo-file-system/legacy";
 import { getSurah, Ayah, Surah } from "../api";
+import { TafsirLanguage } from "../tafsirService";
 import {
   getAudioPrefs,
   getLastPosition,
@@ -20,7 +21,11 @@ import {
   setWidgetPlayingState,
 } from "../widget/widgetManager";
 
-export type PlaybackStage = "idle" | "arabic" | "english";
+// NOTE: AudioPrefs (in ../storage) needs a `tafsir: boolean` field added
+// alongside `arabic`/`english`, and its default/saved shape updated to
+// include it. Everything below assumes that field exists.
+
+export type PlaybackStage = "idle" | "arabic" | "english" | "tafsir";
 
 export type PlaybackState = {
   flow: { surah: Surah; ayahs: Ayah[] } | null;
@@ -36,6 +41,26 @@ export type PlaybackState = {
 export type PlaybackListener = (state: PlaybackState) => void;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Splits text into chunks of at most `maxChars` without cutting words in half.
+ *  Android's TextToSpeech truncates any single utterance past ~4000 chars, so
+ *  long commentaries must be read in pieces. */
+function chunkText(text: string, maxChars: number): string[] {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  if (clean.length <= maxChars) return [clean];
+
+  const chunks: string[] = [];
+  let remaining = clean;
+  while (remaining.length > maxChars) {
+    let cut = remaining.lastIndexOf(" ", maxChars);
+    if (cut < maxChars * 0.5) cut = maxChars; // one huge word — hard cut
+    chunks.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
 
 async function waitForCondition(condition: () => boolean, timeoutMs: number) {
   const start = Date.now();
@@ -63,7 +88,7 @@ class PlaybackController {
     stage: "idle",
     playing: false,
     speed: 1,
-    audioPrefs: { arabic: true, english: true },
+    audioPrefs: { arabic: true, english: true, tafsir: false },
     last: null,
     progress: {},
   };
@@ -85,6 +110,14 @@ class PlaybackController {
   private englishStartedRef = false;
   private lastDidJustFinish = false;
 
+  // Tafsir text for the *current* ayah, supplied by the UI (FlowScreen) as
+  // the reader opens/closes the commentary drawer or switches language.
+  // The controller doesn't fetch tafsir itself — it just reads whatever the
+  // UI hands it, so the drawer's visible content and the spoken content
+  // never drift apart.
+  private currentTafsirText: string | null = null;
+  private currentTafsirLanguage: TafsirLanguage = "urdu";
+
   constructor() {
     this.player.addListener("playbackStatusUpdate", (status) => {
       const justFinished = status.didJustFinish;
@@ -95,7 +128,7 @@ class PlaybackController {
         if (s === "arabic" && this.arabicStartedRef) {
           this.startEnglish();
         } else if (s === "english" && this.englishStartedRef) {
-          this.advance();
+          this.startTafsir();
         }
       } else if (!justFinished) {
         this.lastDidJustFinish = false;
@@ -160,6 +193,7 @@ class PlaybackController {
     this.state.playing = false;
     this.advancingRef = false;
     this.sessionRef++;
+    this.currentTafsirText = null;
     this.clearStageState();
     this.clearReadingTimer();
     this.player.pause();
@@ -422,8 +456,8 @@ class PlaybackController {
 
     // Check if English audio is enabled
     if (!this.state.audioPrefs.english) {
-      // Immediately advance to next ayah without waiting
-      this.advance();
+      // Immediately move on — tafsir (if applicable) or the next ayah
+      this.startTafsir();
       return;
     }
 
@@ -482,6 +516,115 @@ class PlaybackController {
     }
   }
 
+  /**
+   * Speak the tafsir for the current ayah via the phone's native TTS voice,
+   * using the same play/pause/speed controls as everything else. Only runs
+   * when the tafsir read-aloud preference is on — otherwise it's a no-op and
+   * we advance immediately, exactly like before this feature existed.
+   */
+  private async startTafsir() {
+    const session = ++this.sessionRef;
+
+    this.player.pause();
+    Speech.stop();
+    this.clearStageState();
+    if (this.transitionTimer) {
+      clearTimeout(this.transitionTimer);
+      this.transitionTimer = null;
+    }
+
+    this.state.stage = "tafsir";
+    this.emit();
+
+    if (!this.state.audioPrefs.tafsir) {
+      this.advance();
+      return;
+    }
+
+    // The UI feeds the current ayah's tafsir text asynchronously (it may still
+    // be loading from the network/cache when we get here). Give it a moment
+    // before giving up, so reading continues ayah after ayah even when the
+    // commentary drawer is closed.
+    const text = await this.waitForTafsirText(session);
+    if (session !== this.sessionRef) return;
+    if (!text) {
+      this.advance();
+      return;
+    }
+
+    this.speakTafsirText(text, session);
+  }
+
+  /** Polls for the current ayah's tafsir text for up to a few seconds. */
+  private async waitForTafsirText(session: number): Promise<string | null> {
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      if (this.currentTafsirText) return this.currentTafsirText;
+      await sleep(150);
+      if (session !== this.sessionRef) return null;
+    }
+    return this.currentTafsirText;
+  }
+
+  /**
+   * Reads the tafsir aloud. Android's TextToSpeech truncates any single
+   * utterance past ~4000 chars, so long commentaries are split into chunks and
+   * read one after another. A watchdog estimates how long speech should take so
+   * the flow always advances even if the engine never fires its callbacks
+   * (missing voice, engine bug, silent failure).
+   */
+  private speakTafsirText(text: string, session: number) {
+    const language = this.currentTafsirLanguage === "urdu" ? "ur-PK" : "en-US";
+    const chunks = chunkText(text, 3600);
+    let chunkIndex = 0;
+
+    const finish = () => {
+      this.clearReadingTimer();
+      if (session !== this.sessionRef) return;
+      if (this.state.playing) this.advance();
+    };
+
+    const speakNextChunk = () => {
+      if (session !== this.sessionRef) return;
+      if (chunkIndex >= chunks.length) {
+        finish();
+        return;
+      }
+      const chunk = chunks[chunkIndex++];
+
+      // Rough speech-time estimate (~110ms per char at 1×, slower in Urdu) plus
+      // a generous floor for engine startup. advance() is idempotent, so a late
+      // onDone can never double-advance.
+      this.clearReadingTimer();
+      this.readingTimer = setTimeout(() => {
+        if (session !== this.sessionRef) return;
+        finish();
+      }, Math.max(6000, chunk.length * 110));
+
+      Speech.speak(chunk, {
+        language,
+        rate: Math.max(0.5, Math.min(1.0, 0.58 * this.state.speed)),
+        pitch: 1,
+        onDone: () => {
+          if (session !== this.sessionRef) return;
+          speakNextChunk();
+        },
+        onStopped: () => {
+          // Tafsir speech stopped (skip/prev/pause/panel closed mid-read) — a
+          // new start* call already bumped sessionRef, so nothing to do here.
+        },
+        onError: (error) => {
+          console.error("Tafsir text-to-speech error:", error);
+          if (session !== this.sessionRef) return;
+          // Skip the failed chunk rather than stalling the whole flow.
+          speakNextChunk();
+        },
+      });
+    };
+
+    speakNextChunk();
+  }
+
   private startPositionMonitoring() {
     // Clear any existing monitoring
     if (this.englishTimer) {
@@ -495,8 +638,8 @@ class PlaybackController {
 
       const s = this.state.stage;
       const started =
-        s === "arabic" ? this.arabicStartedRef : this.englishStartedRef;
-      if (s === "idle" || !started) return;
+        s === "arabic" ? this.arabicStartedRef : s === "english" ? this.englishStartedRef : false;
+      if (s === "idle" || s === "tafsir" || !started) return;
 
       const duration = this.player.duration;
       const currentTime = this.player.currentTime;
@@ -511,7 +654,7 @@ class PlaybackController {
           this.englishTimer = null;
         }
         if (s === "arabic") this.startEnglish();
-        else this.advance();
+        else this.startTafsir();
       }
     }, 250);
   }
@@ -523,7 +666,7 @@ class PlaybackController {
       pitch: 1,
       onDone: () => {
         if (this.state.playing) {
-          this.advance();
+          this.startTafsir();
         }
       },
       onStopped: () => {
@@ -532,7 +675,7 @@ class PlaybackController {
       onError: (error) => {
         console.error("Text-to-speech error:", error);
         if (this.state.playing) {
-          this.advance();
+          this.startTafsir();
         }
       },
     });
@@ -621,21 +764,44 @@ class PlaybackController {
     if (this.state.stage === "arabic" || this.state.stage === "english") {
       this.player.setPlaybackRate(next);
     }
+    // Tafsir speech rate takes effect the next time it starts speaking —
+    // expo-speech doesn't support changing rate mid-utterance.
     this.emit();
   }
 
-  toggleAudio(stage: "arabic" | "english") {
+  toggleAudio(stage: "arabic" | "english" | "tafsir") {
     const prev = this.state.audioPrefs;
     const next: AudioPrefs =
-      stage === "arabic" ? { ...prev, arabic: !prev.arabic } : { ...prev, english: !prev.english };
+      stage === "arabic"
+        ? { ...prev, arabic: !prev.arabic }
+        : stage === "english"
+          ? { ...prev, english: !prev.english }
+          : { ...prev, tafsir: !prev.tafsir };
     this.state.audioPrefs = next;
     saveAudioPrefs(next);
     setAudioPrefsForWidget(next.arabic, next.english);
     if (this.state.playing && this.state.stage === stage) {
       if (stage === "arabic") this.startArabic();
-      else this.startEnglish();
+      else if (stage === "english") this.startEnglish();
+      else this.startTafsir();
     }
     this.emit();
+  }
+
+  /**
+   * Called by the UI whenever the tafsir drawer's visible content changes —
+   * opened, closed, finished loading, or the Urdu/English tab switched.
+   * Pass `null` when there's nothing valid to read (drawer closed, still
+   * loading, or fetch failed) so playback never speaks stale or absent text.
+   */
+  setTafsirContent(text: string | null, language: TafsirLanguage) {
+    this.currentTafsirText = text;
+    this.currentTafsirLanguage = language;
+    if (this.state.stage === "tafsir" && !text) {
+      // Drawer was closed (or content cleared) while it was being read aloud.
+      Speech.stop();
+      if (this.state.playing) this.advance();
+    }
   }
 }
 

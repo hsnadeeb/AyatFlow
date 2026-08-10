@@ -20,9 +20,9 @@ import {
 
 /**
  * The app's whole data folder (<documentDirectory>/AyatFlow) is mirrored into
- * shared storage at Download/AyatFlow:
+ * shared storage at AyatFlow:
  *
- *   Download/AyatFlow/
+ *   AyatFlow/
  *     ayah-flow-backup.json          legacy combined snapshot (kept for compat)
  *     data/
  *       bookmarks.json
@@ -32,7 +32,7 @@ import {
  *       last.json
  *     quran-audio/SurahN/{arabic,english}/N.mp3   (mirrored by downloadManager)
  *
- * Copying Download/AyatFlow to a new phone and installing the app there is all
+ * Copying AyatFlow to a new phone and installing the app there is all
  * that's needed to move everything over: on first launch syncBackup() restores
  * the data files and the download manager restores the audio.
  */
@@ -44,7 +44,7 @@ const DATA_SUBDIR = "data";
 const SAF_FOLDER_KEY = "ayah-flow:saf-backup-folder";
 const RESTORE_PROMPTED_KEY = "ayah-flow:restore-prompted";
 
-/** Files mirrored into Download/AyatFlow/data/ — the portable data files. */
+/** Files mirrored into AyatFlow/data/ — the portable data files. */
 export const DATA_FILE_NAMES = [
   "bookmarks.json",
   "surah-bookmarks.json",
@@ -207,7 +207,7 @@ async function writeBackupViaSaf(folderUri: string, data: string): Promise<boole
 /**
  * Mirror every data file (bookmarks, progress, prefs, last position) into the
  * shared folder — MediaStore on Android 10+, SAF folder if granted, and the
- * legacy File API on Android 9-. This keeps Download/AyatFlow a complete,
+ * legacy File API on Android 9-. This keeps AyatFlow a complete,
  * portable copy of the app's user data.
  *
  * Files whose content hasn't changed since the last mirror are skipped, so the
@@ -456,12 +456,12 @@ export async function restoreBackupFromSafFolder(folderUri: string): Promise<boo
 }
 
 /**
- * Show the system folder picker, pre-navigated to Download/AyatFlow, and grant
+ * Show the system folder picker, pre-navigated to AyatFlow, and grant
  * the app persistent read/write access to the chosen folder.
  */
 export async function promptForBackupFolder(): Promise<string | null> {
   try {
-    const initialUri = StorageAccessFramework.getUriForDirectoryInRoot("Download/AyatFlow");
+    const initialUri = StorageAccessFramework.getUriForDirectoryInRoot("AyatFlow");
     const result = await StorageAccessFramework.requestDirectoryPermissionsAsync(initialUri);
     if (result.granted && result.directoryUri) {
       await saveBackupFolderUri(result.directoryUri);
