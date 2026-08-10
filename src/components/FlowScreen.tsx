@@ -227,7 +227,7 @@ const FlowScreen = React.memo(function FlowScreen({
       : stage === "english"
         ? { text: "Meaning", color: c.accent2 }
         : stage === "tafsir"
-          ? { text: "Commentary", color: c.ink }
+          ? { text: "Commentary", color: c.heroSub }
           : { text: "Paused", color: c.muted };
 
   const jumpNumber = parseInt(jumpText, 10);
@@ -319,7 +319,7 @@ const FlowScreen = React.memo(function FlowScreen({
             icon="🗣"
             label="Read tafsir aloud"
             value={audioPrefs.tafsir}
-            onBg={c.accentStrong}
+            onBg={c.heroSub}
             onText={c.accent}
             onToggle={() => onToggleAudio("tafsir")}
           />
