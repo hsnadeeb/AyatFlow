@@ -22,26 +22,34 @@ import {
   getLastPosition,
   getSurahProgress,
   migrateLegacyBookmarks,
+  migrateStorageToFiles,
   toggleAyahBookmark,
   toggleSurahBookmark,
 } from "./src/storage";
 import HomeScreen from "./src/components/HomeScreen";
 import FlowScreen from "./src/components/FlowScreen";
 import DownloadManager from "./src/components/DownloadManagerModal";
+import DownloadAllModal from "./src/components/DownloadAllModal";
 import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import RestorePrompt from "./src/components/RestorePrompt";
+import ShareModal from "./src/components/ShareModal";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
+import { downloadAllManager } from "./src/downloadAllManager";
 import {
   scheduleBackupSave,
   saveBackup,
   syncBackup,
-  shouldOfferRestorePick,
+  shouldOfferAutoRestore,
+  isLocalDataEmpty,
+  detectSharedBackup,
 } from "./src/backup";
 import { ThemeProvider, useTheme } from "./src/theme";
 import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetManager";
+import { syncTafsirCacheFromShared } from "./src/tafsirCache";
 import { playbackController } from "./src/playback/playbackController";
 import { registerWidgetPlaybackTask } from "./src/widget/WidgetPlaybackTask";
+import { ensureSharedStoragePermission, sharedStorage } from "./src/sharedStorage";
 
 // Register the headless task used by the home screen widget controls.
 // This must run at module load so the native side can find the task.
@@ -70,9 +78,12 @@ function AppInner() {
   const [surahBookmarks, setSurahBookmarks] = useState<number[]>([]);
   const [downloadManagerVisible, setDownloadManagerVisible] = useState(false);
   const [downloadManagerSurah, setDownloadManagerSurah] = useState<Surah | null>(null);
+  const [downloadAllVisible, setDownloadAllVisible] = useState(false);
+  const [downloadAllRunning, setDownloadAllRunning] = useState(false);
   const [restorePromptVisible, setRestorePromptVisible] = useState(false);
-  const [downloading, setDownloading] = useState(false);
   const [downloadingSurahs, setDownloadingSurahs] = useState<Set<number>>(new Set());
+  const [downloadedSurahs, setDownloadedSurahs] = useState<Set<number>>(new Set());
+  const [shareVisible, setShareVisible] = useState(false);
 
   // Playback state mirrored from the shared controller
   const [flowData, setFlowData] = useState<{ surah: Surah; ayahs: Ayah[] } | null>(
@@ -95,6 +106,7 @@ function AppInner() {
   const stageRef = useRef(stage);
   const flowRef = useRef(flowData);
   const indexRef = useRef(index);
+  const surahsRef = useRef<Surah[]>([]);
 
   useEffect(() => {
     playingRef.current = playing;
@@ -131,11 +143,32 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        // Upgrade the old single bookmark list, then sync with the shared
-        // storage backup (restore on fresh install / refresh otherwise).
+        try {
+          await ensureSharedStoragePermission();
+        } catch (error) {
+          console.warn("Failed to ensure shared storage permission:", error);
+        }
+
+        // Ensure the AyatFlow folder exists in shared storage before any sync operations
+        if (sharedStorage?.ensureAyatFlowFolder) {
+          try {
+            await sharedStorage.ensureAyatFlowFolder();
+          } catch (error) {
+            console.warn("Failed to ensure AyatFlow folder:", error);
+          }
+        }
+
+        // Move any old AsyncStorage-era user data into the AyatFlow folder, then
+        // sync with the shared folder. On a fresh install where a previous backup
+        // exists, DON'T restore silently — the user is asked whether to restore
+        // everything (see shouldOfferAutoRestore below).
         // Must run before ensureInitialized so restored progress/prefs are read.
+        await migrateStorageToFiles();
         await migrateLegacyBookmarks();
-        await syncBackup();
+        const freshInstall = await isLocalDataEmpty();
+        const backupExists = freshInstall && (await detectSharedBackup());
+        await syncBackup(!backupExists);
+        await syncTafsirCacheFromShared();
 
         const [loadedSurahs, savedBookmarks, savedSurahBookmarks] = await Promise.all([
           getSurahs(),
@@ -168,11 +201,10 @@ function AppInner() {
         setLoading(false);
       }
 
-      // After a reinstall Android 10+ hides the previous MediaStore backup
-      // from the reinstalled app, so offer the user the system folder picker
-      // once to re-grant access and restore their bookmarks.
+      // After a reinstall a previous backup may be waiting in shared storage;
+      // offer one automatic restore (no folder picker) when it is.
       try {
-        if (await shouldOfferRestorePick()) {
+        if (await shouldOfferAutoRestore()) {
           setRestorePromptVisible(true);
         }
       } catch {}
@@ -183,6 +215,55 @@ function AppInner() {
       cleanupDownloadManager();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh the per-surah "downloaded" checkmarks whenever downloads change
+  // (foreground, background, delete, or startup sync) and when the surah list
+  // finishes loading. Reuses the previous Set when nothing changed so frequent
+  // progress events don't force pointless re-renders.
+  const refreshDownloadedSurahs = useCallback(() => {
+    const current = surahsRef.current;
+    if (current.length === 0) return;
+    // Status keys are stored under GLOBAL ayah numbers (surah 2's first ayah
+    // is #8, not #1), so compute each surah's starting global number by
+    // walking the ordered list cumulatively.
+    const counts: Record<number, number> = {};
+    const starts: Record<number, number> = {};
+    let global = 1;
+    for (const s of [...current].sort((a, b) => a.number - b.number)) {
+      starts[s.number] = global;
+      counts[s.number] = s.numberOfAyahs;
+      global += s.numberOfAyahs;
+    }
+    setDownloadedSurahs((prev) => {
+      const next = getDownloadManager().getDownloadedSurahs(counts, starts);
+      if (prev.size === next.size && [...prev].every((n) => next.has(n))) return prev;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    surahsRef.current = surahs;
+    if (surahs.length > 0) refreshDownloadedSurahs();
+  }, [surahs, refreshDownloadedSurahs]);
+
+  useEffect(() => {
+    const unsubscribe = getDownloadManager().subscribe(refreshDownloadedSurahs);
+    return unsubscribe;
+  }, [refreshDownloadedSurahs]);
+
+  // Keep the per-surah downloading badges/spinners in sync with the download
+  // manager so a download started from the modal or auto on surah open updates
+  // the same indicators (the manager coalesces both into a single batch anyway).
+  useEffect(() => {
+    const unsubscribe = getDownloadManager().subscribe(() => {
+      setDownloadingSurahs((prev) => {
+        const next = getDownloadManager().getDownloadingSurahs();
+        if (prev.size === next.size && [...prev].every((n) => next.has(n))) return prev;
+        return next;
+      });
+    });
+    return unsubscribe;
   }, []);
 
   const handleSample = React.useCallback((sample: { channels: { frames: number[] }[] }) => {
@@ -233,27 +314,25 @@ function AppInner() {
   async function startBackgroundDownload(surahNumber: number, ayahs: Ayah[]) {
     const downloadManager = getDownloadManager();
 
+    // If a bulk download for this surah is already running (e.g. the user tapped
+    // "Download All Audio" in the modal), don't start a second racing batch.
+    if (downloadManager.isSurahDownloading(surahNumber)) return;
+
     // Check if surah is already downloaded
-    const progress = await downloadManager.getSurahDownloadProgress(surahNumber, ayahs.length);
+    const progress = await downloadManager.getSurahDownloadProgress(
+      surahNumber,
+      ayahs.length,
+      ayahs[0]?.number
+    );
     if (progress >= 1) {
       return; // Already fully downloaded
     }
 
-    // Start background download without blocking UI
-    setDownloading(true);
-    setDownloadingSurahs((prev) => new Set(prev).add(surahNumber));
-
     try {
+      // Start background download without blocking UI
       await downloadManager.downloadSurahAudio(surahNumber, ayahs);
     } catch (error) {
       // Don't show error to user since this is background
-    } finally {
-      setDownloading(false);
-      setDownloadingSurahs((prev) => {
-        const next = new Set(prev);
-        next.delete(surahNumber);
-        return next;
-      });
     }
   }
 
@@ -321,6 +400,10 @@ function AppInner() {
   const onOpenSettings = useCallback(() => {
     playbackController.stopAll();
     setScreen("settings");
+  }, []);
+
+  const openDownloadAll = useCallback(() => {
+    setDownloadAllVisible(true);
   }, []);
 
   const onOpenBookmarks = useCallback(() => {
@@ -398,7 +481,7 @@ function AppInner() {
     });
   }, []);
 
-  const onToggleAudio = useCallback((s: "arabic" | "english") => {
+  const onToggleAudio = useCallback((s: "arabic" | "english" | "tafsir") => {
     playbackController.toggleAudio(s);
   }, []);
 
@@ -427,6 +510,13 @@ function AppInner() {
     } catch (error) {
       console.error("Failed to refresh restored data:", error);
     }
+
+    // The folder was only granted now, so audio/tafsir couldn't have been
+    // restored at startup — re-run those syncs with SAF access.
+    getDownloadManager().resyncFromSharedStorage().catch((error) => {
+      console.warn("Failed to resync audio from backup folder:", error);
+    });
+    syncTafsirCacheFromShared().catch(() => {});
   }, []);
 
   const openSurahHandler = useCallback(
@@ -464,9 +554,11 @@ function AppInner() {
           downloadingSurahs={downloadingSurahs}
           surahBookmarks={surahBookmarks}
           bookmarksCount={bookmarks.length + surahBookmarks.length}
+          downloadedSurahs={downloadedSurahs}
           onOpenSurah={openSurahHandler}
           onOpenSettings={onOpenSettings}
           onOpenBookmarks={onOpenBookmarks}
+          onOpenShare={() => setShareVisible(true)}
           onToggleSurahBookmark={onToggleSurahBookmark}
           onWidgetPress={() => last && openSurahHandler(last.surah, last.ayahIndex)}
         />
@@ -491,7 +583,9 @@ function AppInner() {
         <StatusBar style={isDark ? "light" : "dark"} />
         <SettingsScreen
           audioPrefs={audioPrefs}
+          surahs={surahs}
           onToggleAudio={onToggleAudio}
+          onOpenDownloadAll={openDownloadAll}
           onClose={onCloseSubScreen}
         />
       </SafeAreaView>
@@ -531,7 +625,7 @@ function AppInner() {
           bookmarks={bookmarks}
           audioPrefs={audioPrefs}
           glow={glow}
-          downloading={downloading}
+          downloading={downloadingSurahs.size > 0}
           onBack={onBack}
           onTogglePlay={onTogglePlay}
           onPrevious={onPrevious}
@@ -542,6 +636,7 @@ function AppInner() {
           onToggleAudio={onToggleAudio}
           onOpenDownloadManager={onOpenFlowDownloadManager}
           onJumpToAyah={onJumpToAyah}
+          onTafsirContentChange={(text, language) => playbackController.setTafsirContent(text, language)}
         />
         <DownloadManager
           visible={downloadManagerVisible}
@@ -556,6 +651,17 @@ function AppInner() {
   return (
     <SafeAreaProvider>
       {content}
+      <ShareModal
+        visible={shareVisible}
+        surahs={surahs}
+        downloadedSurahs={downloadedSurahs}
+        onClose={() => setShareVisible(false)}
+      />
+      <DownloadAllModal
+        visible={downloadAllVisible}
+        surahs={surahs}
+        onClose={() => setDownloadAllVisible(false)}
+      />
       <RestorePrompt
         visible={restorePromptVisible}
         onDismiss={() => setRestorePromptVisible(false)}

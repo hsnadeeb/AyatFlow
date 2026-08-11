@@ -6,7 +6,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.os.Build
 import android.widget.RemoteViews
 import org.json.JSONObject
@@ -40,6 +40,7 @@ class AyatWidgetProvider : AppWidgetProvider() {
             ACTION_PREVIOUS -> dispatchAction(context, "previous")
             ACTION_TOGGLE_ARABIC -> dispatchAction(context, "toggleArabic")
             ACTION_TOGGLE_ENGLISH -> dispatchAction(context, "toggleEnglish")
+            ACTION_TOGGLE_TAFSIR -> dispatchAction(context, "toggleTafsir")
             ACTION_UPDATE_WIDGET -> {
                 val appWidgetManager = AppWidgetManager.getInstance(context)
                 val appWidgetIds = appWidgetManager.getAppWidgetIds(
@@ -81,9 +82,7 @@ class AyatWidgetProvider : AppWidgetProvider() {
         const val ACTION_PREVIOUS = "com.hasnadeeb.ayahflow.PREVIOUS"
         const val ACTION_TOGGLE_ARABIC = "com.hasnadeeb.ayahflow.TOGGLE_ARABIC"
         const val ACTION_TOGGLE_ENGLISH = "com.hasnadeeb.ayahflow.TOGGLE_ENGLISH"
-
-        private const val COLOR_ACCENT = 0xFF2BB5A5.toInt()
-        private const val COLOR_MUTED = 0xFF9BA1A6.toInt()
+        const val ACTION_TOGGLE_TAFSIR = "com.hasnadeeb.ayahflow.TOGGLE_TAFSIR"
 
         fun updateAppWidget(context: Context, appWidgetManager: AppWidgetManager, appWidgetId: Int) {
             val sharedPrefs = context.getSharedPreferences("AyahWidgetPrefs", Context.MODE_PRIVATE)
@@ -91,6 +90,19 @@ class AyatWidgetProvider : AppWidgetProvider() {
             val isPlaying = sharedPrefs.getBoolean("isPlaying", false)
             val arabicOn = sharedPrefs.getBoolean("audioArabic", true)
             val englishOn = sharedPrefs.getBoolean("audioEnglish", true)
+            val tafsirOn = sharedPrefs.getBoolean("audioTafsir", false)
+            val isDarkTheme = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+            val accentColor = context.getColor(if (isDarkTheme) R.color.widget_accent_dark else R.color.widget_accent_light)
+            val mutedColor = context.getColor(if (isDarkTheme) R.color.widget_muted_dark else R.color.widget_muted_light)
+            val primaryTextColor = context.getColor(if (isDarkTheme) R.color.widget_text_dark else R.color.widget_text_light)
+            val secondaryTextColor = context.getColor(if (isDarkTheme) R.color.widget_secondary_dark else R.color.widget_secondary_light)
+            val surfaceColor = context.getColor(if (isDarkTheme) R.color.widget_surface_dark else R.color.widget_surface_light)
+            val surfaceAltColor = context.getColor(if (isDarkTheme) R.color.widget_surface_alt_dark else R.color.widget_surface_alt_light)
+            val activeChipColor = context.getColor(if (isDarkTheme) R.color.widget_chip_active_dark else R.color.widget_chip_active_light)
+            val inactiveChipColor = context.getColor(if (isDarkTheme) R.color.widget_chip_inactive_dark else R.color.widget_chip_inactive_light)
+            val controlTint = context.getColor(if (isDarkTheme) R.color.widget_control_tint_dark else R.color.widget_control_tint_light)
+            val playButtonColor = context.getColor(if (isDarkTheme) R.color.widget_play_button_dark else R.color.widget_play_button_light)
 
             var surahName = "Al-Faatiha"
             var ayahNumber = "Ayat 1"
@@ -118,6 +130,14 @@ class AyatWidgetProvider : AppWidgetProvider() {
             views.setTextViewText(R.id.ayah_number, ayahNumber)
             views.setTextViewText(R.id.arabic_text, arabicText)
             views.setTextViewText(R.id.translation, translation)
+            views.setTextViewText(R.id.tafsir_toggle, "Tafsir")
+
+            views.setInt(R.id.widget_root, "setBackgroundColor", surfaceColor)
+            views.setTextColor(R.id.surah_name, secondaryTextColor)
+            views.setTextColor(R.id.ayah_number, accentColor)
+            views.setTextColor(R.id.arabic_text, primaryTextColor)
+            views.setTextColor(R.id.translation, secondaryTextColor)
+            views.setTextColor(R.id.tafsir_toggle, if (tafsirOn) accentColor else mutedColor)
 
             // Play/pause icon reflects the current state
             views.setImageViewResource(
@@ -131,24 +151,18 @@ class AyatWidgetProvider : AppWidgetProvider() {
             views.setProgressBar(R.id.progress_bar, 100, progressPercent, false)
 
             // Language audio toggle chips reflect the saved preferences
-            views.setInt(
-                R.id.arabic_toggle,
-                "setBackgroundResource",
-                if (arabicOn) R.drawable.ayah_chip_background else R.drawable.widget_chip_inactive
-            )
-            views.setTextColor(
-                R.id.arabic_toggle,
-                if (arabicOn) COLOR_ACCENT else COLOR_MUTED
-            )
-            views.setInt(
-                R.id.english_toggle,
-                "setBackgroundResource",
-                if (englishOn) R.drawable.ayah_chip_background else R.drawable.widget_chip_inactive
-            )
-            views.setTextColor(
-                R.id.english_toggle,
-                if (englishOn) COLOR_ACCENT else COLOR_MUTED
-            )
+            views.setInt(R.id.arabic_toggle, "setBackgroundColor", if (arabicOn) activeChipColor else inactiveChipColor)
+            views.setTextColor(R.id.arabic_toggle, if (arabicOn) accentColor else mutedColor)
+            views.setInt(R.id.english_toggle, "setBackgroundColor", if (englishOn) activeChipColor else inactiveChipColor)
+            views.setTextColor(R.id.english_toggle, if (englishOn) accentColor else mutedColor)
+            views.setInt(R.id.tafsir_toggle, "setBackgroundColor", if (tafsirOn) activeChipColor else inactiveChipColor)
+
+            views.setInt(R.id.previous_button, "setColorFilter", controlTint)
+            views.setInt(R.id.next_button, "setColorFilter", controlTint)
+            views.setInt(R.id.play_pause_button, "setColorFilter", playButtonColor)
+            views.setInt(R.id.play_pause_button, "setBackgroundColor", accentColor)
+            views.setInt(R.id.previous_button, "setBackgroundColor", surfaceAltColor)
+            views.setInt(R.id.next_button, "setBackgroundColor", surfaceAltColor)
 
             // Tapping the widget body opens the app (no playback action)
             val openAppIntent = Intent(context, MainActivity::class.java).apply {
@@ -168,6 +182,7 @@ class AyatWidgetProvider : AppWidgetProvider() {
             // Language toggles: headless actions, no activity launch
             val arabicTogglePendingIntent = actionPendingIntent(context, ACTION_TOGGLE_ARABIC, 4)
             val englishTogglePendingIntent = actionPendingIntent(context, ACTION_TOGGLE_ENGLISH, 5)
+            val tafsirTogglePendingIntent = actionPendingIntent(context, ACTION_TOGGLE_TAFSIR, 6)
 
             views.setOnClickPendingIntent(R.id.widget_root, openAppPendingIntent)
             views.setOnClickPendingIntent(R.id.play_pause_button, playPausePendingIntent)
@@ -175,6 +190,7 @@ class AyatWidgetProvider : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.previous_button, previousPendingIntent)
             views.setOnClickPendingIntent(R.id.arabic_toggle, arabicTogglePendingIntent)
             views.setOnClickPendingIntent(R.id.english_toggle, englishTogglePendingIntent)
+            views.setOnClickPendingIntent(R.id.tafsir_toggle, tafsirTogglePendingIntent)
 
             appWidgetManager.updateAppWidget(appWidgetId, views)
         }

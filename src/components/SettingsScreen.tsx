@@ -1,20 +1,28 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
+  Image,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
-  Image
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Surah } from "../api";
 import { AudioPrefs } from "../storage";
 import { radii, serif, ThemeMode, useTheme, useThemedStyles } from "../theme";
 import { getDownloadManager } from "../downloadManager";
+import { ensureSharedStoragePermission, openAyatFlowFolder } from "../sharedStorage";
+
+
 
 type Props = {
   audioPrefs: AudioPrefs;
-  onToggleAudio: (stage: "arabic" | "english") => void;
+  surahs: Surah[];
+  onToggleAudio: (stage: "arabic" | "english" | "tafsir") => void;
+  onOpenDownloadAll: () => void;
   onClose: () => void;
 };
 
@@ -65,13 +73,13 @@ function Toggle({
   );
 }
 
-export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: Props) {
+export default function SettingsScreen({ audioPrefs, surahs, onToggleAudio, onOpenDownloadAll, onClose }: Props) {
   const insets = useSafeAreaInsets();
   const styles = useThemedStyles(createStyles);
   const { palette: c, isDark, mode, setMode } = useTheme();
   const [storageMb, setStorageMb] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refreshStorage = useCallback(() => {
     let active = true;
     getDownloadManager()
       .getTotalStorageSize()
@@ -84,12 +92,37 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
     };
   }, []);
 
+  useEffect(() => refreshStorage(), [refreshStorage]);
+
+  // Keep the size live: downloading (foreground or background), deleting, or
+  // restoring audio all emit events, and the settings screen follows along.
+  useEffect(() => {
+    const unsubscribe = getDownloadManager().subscribe(() => refreshStorage());
+    return unsubscribe;
+  }, [refreshStorage]);
+
   const onModePress = useCallback(
     (m: ThemeMode) => {
       setMode(m);
     },
     [setMode]
   );
+
+  const onOpenAyatFlowFolder = useCallback(async () => {
+    try {
+      const hasPermission = await ensureSharedStoragePermission();
+      if (!hasPermission && Platform.OS === "android") {
+        Alert.alert("Ayat Flow", "Storage access is limited on this Android version, so the folder will open only if the device exposes it.");
+      }
+
+      const opened = await openAyatFlowFolder();
+      if (!opened) {
+        Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened automatically. You can still browse it from the device’s Files app if it is visible.");
+      }
+    } catch {
+      Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened right now.");
+    }
+  }, []);
 
   return (
     <View style={styles.screen}>
@@ -142,10 +175,38 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
               <Toggle value={audioPrefs.english} onToggle={() => onToggleAudio("english")} />
             }
           />
+          <View style={styles.cardDivider} />
+          <Row
+            label="Read tafsir aloud"
+            sub="Commentary voice (Urdu or English)"
+            right={
+              <Toggle value={audioPrefs.tafsir} onToggle={() => onToggleAudio("tafsir")} />
+            }
+          />
         </View>
 
         <Text style={styles.sectionLabel}>STORAGE</Text>
         <View style={styles.card}>
+          <Row
+            label="Download everything"
+            sub="Recitation, meaning audio, and tafsir for every surah"
+            right={
+              <Pressable style={styles.actionBtn} onPress={onOpenDownloadAll} accessibilityRole="button">
+                <Text style={styles.actionBtnText}>{surahs.length > 0 ? "Download" : "Preparing…"}</Text>
+              </Pressable>
+            }
+          />
+          <View style={styles.cardDivider} />
+          <Row
+            label="Open AyatFlow folder"
+            sub="Browse the mirrored downloads, bookmarks, and backup files"
+            right={
+              <Pressable style={styles.actionBtn} onPress={onOpenAyatFlowFolder} accessibilityRole="button">
+                <Text style={styles.actionBtnText}>Open</Text>
+              </Pressable>
+            }
+          />
+          <View style={styles.cardDivider} />
           <Row
             label="Downloaded audio"
             sub={
@@ -331,6 +392,17 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     toggleKnobOn: {
       alignSelf: "flex-end",
       backgroundColor: c.accent,
+    },
+    actionBtn: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: radii.control,
+      backgroundColor: c.accent,
+    },
+    actionBtnText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: c.onAccent,
     },
     storageValue: {
       fontSize: 14,

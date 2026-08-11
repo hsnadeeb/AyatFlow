@@ -31,6 +31,7 @@ export const TAFSIR_EDITIONS: Record<TafsirLanguage, TafsirEdition> = {
 };
 
 const BASE_URL = 'https://cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir';
+const FALLBACK_BASE_URL = 'https://raw.githubusercontent.com/spa5k/tafsir_api/main/tafsir';
 const FETCH_TIMEOUT_MS = 30_000;
 
 /** One in-flight whole-surah fetch per language+surah, so repeated ayah
@@ -77,11 +78,23 @@ export async function getSurahTafsir(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(`${BASE_URL}/${edition.slug}/${surahNumber}.json`, {
-        signal: controller.signal,
-      });
+      let response: Response;
+      let url = `${BASE_URL}/${edition.slug}/${surahNumber}.json`;
+      
+      try {
+        response = await fetch(url, {
+          signal: controller.signal,
+        });
+      } catch (primaryError) {
+        console.warn(`[Tafsir] Primary CDN failed, trying fallback:`, primaryError);
+        url = `${FALLBACK_BASE_URL}/${edition.slug}/${surahNumber}.json`;
+        response = await fetch(url, {
+          signal: controller.signal,
+        });
+      }
+      
       if (!response.ok) {
-        throw new Error(`Tafsir request failed (HTTP ${response.status})`);
+        throw new Error(`Tafsir request failed (HTTP ${response.status}) from ${url}`);
       }
       const map = normalize(await response.json());
       if (Object.keys(map).length === 0) {

@@ -20,9 +20,11 @@ type Props = {
   downloadingSurahs: Set<number>;
   surahBookmarks: number[];
   bookmarksCount: number;
+  downloadedSurahs: Set<number>;
   onOpenSurah: (number: number, resumeIndex?: number) => void;
   onOpenSettings: () => void;
   onOpenBookmarks: () => void;
+  onOpenShare: () => void;
   onToggleSurahBookmark: (number: number) => void;
   onWidgetPress?: () => void;
 };
@@ -34,6 +36,7 @@ type RowProps = {
   heard: number | undefined;
   downloading: boolean;
   bookmarked: boolean;
+  downloaded: boolean;
   onOpen: (number: number, resumeIndex?: number) => void;
   onToggleBookmark: () => void;
 };
@@ -43,6 +46,7 @@ const SurahRow = React.memo(function SurahRow({
   heard,
   downloading,
   bookmarked,
+  downloaded,
   onOpen,
   onToggleBookmark,
 }: RowProps) {
@@ -74,6 +78,11 @@ const SurahRow = React.memo(function SurahRow({
           </Text>
         </View>
         <Text style={styles.rowArabic}>{item.name}</Text>
+        {downloaded && (
+          <View style={styles.downloadedBadge} accessibilityLabel="Audio downloaded">
+            <Text style={styles.downloadedBadgeText}>✓</Text>
+          </View>
+        )}
         <Pressable
           onPress={onToggleBookmark}
           hitSlop={8}
@@ -100,9 +109,11 @@ export default function HomeScreen({
   downloadingSurahs,
   surahBookmarks,
   bookmarksCount,
+  downloadedSurahs,
   onOpenSurah,
   onOpenSettings,
   onOpenBookmarks,
+  onOpenShare,
   onToggleSurahBookmark,
   onWidgetPress,
 }: Props) {
@@ -137,11 +148,12 @@ export default function HomeScreen({
         heard={progress[item.number]}
         downloading={downloadingSurahs.has(item.number)}
         bookmarked={surahBookmarkSet.has(item.number)}
+        downloaded={downloadedSurahs.has(item.number)}
         onOpen={onOpenSurah}
         onToggleBookmark={() => onToggleSurahBookmark(item.number)}
       />
     ),
-    [progress, downloadingSurahs, surahBookmarkSet, onOpenSurah, onToggleSurahBookmark]
+    [progress, downloadingSurahs, surahBookmarkSet, downloadedSurahs, onOpenSurah, onToggleSurahBookmark]
   );
 
   const header = (
@@ -153,6 +165,14 @@ export default function HomeScreen({
           <Text style={styles.tagline}>Hear the recitation, read the meaning.</Text>
         </View>
         <View style={styles.headerActions}>
+          <Pressable
+            style={styles.iconBtn}
+            onPress={onOpenShare}
+            hitSlop={6}
+            accessibilityLabel="Share downloaded audio"
+          >
+            <Text style={styles.iconGlyph}>↗</Text>
+          </Pressable>
           <Pressable
             style={styles.iconBtn}
             onPress={onOpenBookmarks}
@@ -516,6 +536,21 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     },
     rowStarActive: {
       color: c.accent,
+    },
+    downloadedBadge: {
+      width: 22,
+      height: 22,
+      borderRadius: 11,
+      backgroundColor: c.success,
+      justifyContent: "center",
+      alignItems: "center",
+      marginLeft: 8,
+    },
+    downloadedBadgeText: {
+      color: "#FFFFFF",
+      fontSize: 12,
+      fontWeight: "800",
+      lineHeight: 14,
     },
     downloadBtn: {
       width: 32,
