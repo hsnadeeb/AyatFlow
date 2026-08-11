@@ -21,10 +21,9 @@ import {
 
 /**
  * The app's whole data folder (<documentDirectory>/AyatFlow) is mirrored into
- * shared storage at AyatFlow:
+ * shared storage under Download/AyatFlow:
  *
- *   AyatFlow/
- *     ayah-flow-backup.json          legacy combined snapshot (kept for compat)
+ *   Download/AyatFlow/
  *     data/
  *       bookmarks.json
  *       surah-bookmarks.json
@@ -34,19 +33,36 @@ import {
  *       tafsir-language.json
  *     quran-audio/SurahN/{arabic,english}/N.mp3   (mirrored by downloadManager)
  *     tafsir/{urdu,english}/N.json                (mirrored by tafsirCache)
+ *     backups/ayah-flow-backup.json               (combined snapshot)
  *
- * Copying AyatFlow to a new phone and installing the app there is all
- * that's needed to move everything over: on first launch syncBackup() restores
- * the data files, syncTafsirCacheFromShared() restores the tafsir cache, and
- * the download manager restores the audio.
+ * Copying the AyatFlow folder to a new phone and installing the app there is
+ * all that's needed to move everything over: on first launch syncBackup()
+ * restores the data files, syncTafsirCacheFromShared() restores the tafsir
+ * cache, and the download manager restores the audio.
  */
 
 const BACKUP_VERSION = 1;
 const SAVE_DEBOUNCE_MS = 1500;
 const BACKUP_FILE_NAME = "ayah-flow-backup.json";
-const DATA_SUBDIR = "data";
 const SAF_FOLDER_KEY = "ayah-flow:saf-backup-folder";
 const RESTORE_PROMPTED_KEY = "ayah-flow:restore-prompted";
+
+/**
+ * Relative path of the data folder inside a user-granted SAF tree.
+ */
+const DATA_SUBDIR = "data";
+
+/**
+ * MediaStore relativeDir contract for saveDataFile/readDataFile:
+ *
+ * Empty string means files live directly in Download/AyatFlow/data/.
+ * The native module prepends its own data root, so "data" (or any other
+ * full path) must never be passed here.
+ */
+const SHARED_DATA_SUBDIR = "";
+
+/** Relative path of the backup folder inside a user-granted SAF tree. */
+const BACKUPS_SUBDIR = "backups";
 
 /** Files mirrored into AyatFlow/data/ — the portable data files. */
 export const DATA_FILE_NAMES = [
@@ -185,7 +201,7 @@ async function mirrorDataToShared(): Promise<void> {
   if (module && (await ensureSharedStoragePermission())) {
     for (const [name, content] of changed) {
       try {
-        await module.saveDataFile(DATA_SUBDIR, name, content);
+        await module.saveDataFile(SHARED_DATA_SUBDIR, name, content);
         lastMirrored.set(name, content);
       } catch (error) {
         console.warn(`Failed to mirror ${name} via MediaStore:`, error);
@@ -213,7 +229,7 @@ function resetLastMirrored(): void {
 async function readSharedDataFile(dataFileName: string): Promise<string | null> {
   if (module && (await ensureSharedStoragePermission())) {
     try {
-      const raw = await module.readDataFile(DATA_SUBDIR, dataFileName);
+      const raw = await module.readDataFile(SHARED_DATA_SUBDIR, dataFileName);
       if (raw) return raw;
     } catch (error) {
       console.warn(`Failed to read ${dataFileName} via MediaStore:`, error);
@@ -371,7 +387,7 @@ export async function saveBackup(): Promise<void> {
   }
 
   const folder = await getBackupFolderUri();
-  if (folder && (await safWriteTextFile(folder, BACKUP_FILE_NAME, data))) {
+  if (folder && (await safWriteTextFile(folder, `${BACKUPS_SUBDIR}/${BACKUP_FILE_NAME}`, data))) {
     wroteAny = true;
   }
 
@@ -475,7 +491,7 @@ export async function detectSharedBackup(): Promise<boolean> {
   if (!module) return false;
   if (!(await ensureSharedStoragePermission())) return false;
   try {
-    const bookmarks = await module.readDataFile(DATA_SUBDIR, "bookmarks.json");
+    const bookmarks = await module.readDataFile(SHARED_DATA_SUBDIR, "bookmarks.json");
     if (bookmarks) return true;
   } catch (error) {
     console.warn("Failed to check bookmarks via MediaStore:", error);

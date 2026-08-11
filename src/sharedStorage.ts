@@ -1,61 +1,125 @@
-import { NativeModules, PermissionsAndroid, Platform } from "react-native";
+import {
+  NativeModules,
+  Platform,
+  PermissionsAndroid,
+} from 'react-native';
 
 /**
- * Bridge to the native AyahPersistenceModule (Android only). Backs up app
- * data and mirrors audio downloads into shared storage
- * (/storage/emulated/0/AyatFlow/) so they survive app uninstall.
- * On iOS this is null: the app sandbox has no shared folder without cloud.
+ * Native bridge to AyahPersistenceModule.
+ *
+ * Android:
+ * - Mirrors Quran audio into shared storage.
+ * - Uses MediaStore on Android 10+.
+ * - Uses legacy filesystem storage on Android 9 and below.
+ *
+ * iOS:
+ * - null. iOS app storage is sandboxed unless the user explicitly chooses
+ *   an external/Files location through SAF-equivalent APIs.
  */
 export const sharedStorage =
-  Platform.OS === "android" ? NativeModules.AyahPersistenceModule : null;
+  Platform.OS === 'android'
+    ? NativeModules.AyahPersistenceModule
+    : null;
 
 /**
- * Ask for the storage-related runtime permission at startup so Android shows
- * the prompt when the app is installed or reinstalled. On Android 10+ the
- * prompt is still useful for file access visibility; on Android 9 and below we
- * use the legacy WRITE_EXTERNAL_STORAGE permission.
+ * Android storage API levels:
+ *
+ * API 29+:
+ *   MediaStore/Downloads is scoped-storage compatible.
+ *   The app does NOT need READ_MEDIA_AUDIO or READ_EXTERNAL_STORAGE to
+ *   access media files that the app itself created.
+ *
+ * API 28 and below:
+ *   Legacy external storage permissions are required.
  */
 export async function ensureSharedStoragePermission(): Promise<boolean> {
-  if (!sharedStorage) return false;
-  const sdk = Number(Platform.Version ?? 99);
-
-  if (sdk >= 33) {
-    try {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.READ_MEDIA_AUDIO
-      );
-      return granted === PermissionsAndroid.RESULTS.GRANTED;
-    } catch {
-      return false;
-    }
+  if (!sharedStorage) {
+    return false;
   }
 
-  if (sdk >= 30) {
-    try {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE
-      );
-      return granted === PermissionsAndroid.RESULTS.GRANTED;
-    } catch {
-      return false;
-    }
+  if (Platform.OS !== 'android') {
+    return false;
   }
 
+  const sdk = Number(Platform.Version ?? 0);
+
+  /*
+   * Android 10+ / API 29+.
+   *
+   * IMPORTANT:
+   *
+   * Do NOT request READ_MEDIA_AUDIO here.
+   *
+   * AyatFlow is accessing files that AyatFlow itself creates in MediaStore.
+   * Android grants the owning app access to its own MediaStore files without
+   * a runtime storage permission.
+   *
+   * This is also important because requesting READ_MEDIA_AUDIO here can make
+   * the app look like it needs access to the user's entire audio library,
+   * even though it doesn't.
+   */
+  if (sdk >= 29) {
+    return true;
+  }
+
+  /*
+   * Android 9 / API 28 and below.
+   *
+   * WRITE_EXTERNAL_STORAGE is the relevant permission for creating files in
+   * shared external storage.
+   */
   try {
-    const granted = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
+    const permission =
+      PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
+
+    const alreadyGranted =
+      await PermissionsAndroid.check(permission);
+
+    if (alreadyGranted) {
+      return true;
+    }
+
+    const result =
+      await PermissionsAndroid.request(
+        permission
+      );
+
+    return (
+      result ===
+      PermissionsAndroid.RESULTS.GRANTED
     );
-    return granted === PermissionsAndroid.RESULTS.GRANTED;
-  } catch {
+  } catch (error) {
+    console.warn(
+      'sharedStorage: failed to request legacy storage permission:',
+      error
+    );
+
     return false;
   }
 }
 
+/**
+ * Opens AyatFlow's shared/backup folder.
+ *
+ * The native implementation is responsible for launching the appropriate
+ * Android folder picker / storage UI.
+ */
 export async function openAyatFlowFolder(): Promise<boolean> {
-  if (!sharedStorage) return false;
+  if (!sharedStorage) {
+    return false;
+  }
+
   try {
-    return (await sharedStorage.openAyatFlowFolder()) === true;
-  } catch {
+    const result =
+      await sharedStorage.openAyatFlowFolder();
+
+    return result === true;
+  } catch (error) {
+    console.warn(
+      'sharedStorage: failed to open AyatFlow folder:',
+      error
+    );
+
     return false;
   }
 }

@@ -24,9 +24,9 @@ function memoryKey(language: TafsirLanguage, surahNumber: number): string {
  * so tafsir works fully offline once a surah has been viewed once.
  *
  * Working copies live in <documentDirectory>/AyatFlow/tafsir/ and are
- * mirrored into the shared /storage/emulated/0/AyatFlow/tafsir/ folder, so
- * the cache travels with the rest of the app data when the user copies the
- * AyatFlow folder to another phone.
+ * mirrored into the shared /storage/emulated/0/Download/AyatFlow/tafsir/
+ * folder, so the cache travels with the rest of the app data when the user
+ * copies the AyatFlow folder to another phone.
  */
 export async function loadSurahFromCache(
   language: TafsirLanguage,

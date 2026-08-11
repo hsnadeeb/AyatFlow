@@ -2,13 +2,15 @@ package com.hasnadeeb.ayahflow
 
 import android.content.ContentUris
 import android.content.ContentValues
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
+
+import androidx.documentfile.provider.DocumentFile
+
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -16,24 +18,25 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableArray
+
 import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.URI
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
-import androidx.documentfile.provider.DocumentFile
+
 
 /**
- * Persists app data and mirrors audio downloads to shared storage so they
- * survive app uninstall/reinstall.
+ * AyatFlow persistent storage bridge.
  *
- * Shared storage layout:
+ * Canonical shared-storage layout (all Android versions):
  *
- * Android 10+ (API 29+):
  * /storage/emulated/0/Download/AyatFlow/
- * ├── ayah-flow-backup.json
  * ├── data/
  * │   ├── bookmarks.json
  * │   ├── surah-bookmarks.json
@@ -43,164 +46,272 @@ import androidx.documentfile.provider.DocumentFile
  * │   └── tafsir-language.json
  * ├── quran-audio/
  * │   └── SurahN/{arabic,english}/N.mp3
- * └── tafsir/
- *     └── {urdu,english}/N.json
+ * ├── tafsir/
+ * │   └── {urdu,english}/N.json
+ * └── backups/
+ *     └── ayah-flow-backup.json
  *
- * Android 9- (API 28-):
- * /storage/emulated/0/AyatFlow/
- *   Same layout, accessed through the public external storage root via the
- *   File API (WRITE_EXTERNAL_STORAGE permission required).
- *
- * NOTE: MediaStore RELATIVE_PATHs on API 29+ MUST start with an allowed
- * primary directory (Download, Documents, Music, ...). A bare "AyatFlow/"
- * root is rejected with "Primary directory AyatFlow not allowed", so the
- * folder lives under Download/ on modern Android. The AyatFlow folder stays
- * portable either way: copying it to a new phone and installing the app
- * there allows the app to restore the data.
+ * IMPORTANT:
+ * - Android 10+ shared files are written through MediaStore.
+ * - Android 9- uses the legacy File API, also under Download/AyatFlow.
+ * - SAF methods are available for a user-selected folder.
+ * - SAF URI permissions are explicitly persisted.
+ * - Large files are copied using streams rather than readBytes().
  */
-class AyahPersistenceModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
-
-    private val appContext: Context = reactContext.applicationContext
+class AyahPersistenceModule(
+    private val appContext: ReactApplicationContext
+) : ReactContextBaseJavaModule(appContext) {
 
     override fun getName(): String = "AyahPersistenceModule"
 
-    // ---------------------------------------------------------------------
-    // All-files access (Android 11+) — makes /storage/emulated/0/AyatFlow
-    // directly readable/writable, so the folder is visible in file managers
-    // and survives uninstall/reinstall (MediaStore files become unreadable
-    // to a reinstalled app).
-    // ---------------------------------------------------------------------
+    companion object {
+    private const val TAG = "AyahPersistenceModule"
 
+    private const val BACKUP_FILE_NAME =
+        "ayah-flow-backup.json"
+
+    private const val ANCHOR_FILE_NAME =
+        ".ayatflow"
+
+    /*
+     * Canonical shared-storage layout. Single source of truth.
+     *
+     *   Download/AyatFlow/
+     *   ├── data/            bookmarks.json, surah-bookmarks.json, ...
+     *   ├── quran-audio/     SurahN/{arabic,english}/N.mp3
+     *   ├── tafsir/          {urdu,english}/N.json
+     *   └── backups/         ayah-flow-backup.json
+     *
+     * MediaStore RELATIVE_PATH values for the public Downloads directory.
+     *
+     * Do not use Environment.DIRECTORY_DOWNLOADS here in a const val.
+     * It is a runtime value, not a Kotlin compile-time constant.
+     */
+    private const val MEDIASTORE_ROOT =
+        "Download/AyatFlow/"
+
+    private const val DATA_ROOT =
+        "Download/AyatFlow/data/"
+
+    private const val AUDIO_ROOT =
+        "Download/AyatFlow/quran-audio/"
+
+    private const val TAFSIR_ROOT =
+        "Download/AyatFlow/tafsir/"
+
+    private const val BACKUPS_ROOT =
+        "Download/AyatFlow/backups/"
+
+    /*
+     * Legacy (Android 9-) roots.
+     *
+     * The legacy layout now matches the canonical layout:
+     * /storage/emulated/0/Download/AyatFlow/...
+     *
+     * These strings are relative to Environment.getExternalStorageDirectory().
+     */
+    private const val LEGACY_ROOT =
+        "Download/AyatFlow"
+
+    private const val LEGACY_DATA_ROOT =
+        "$LEGACY_ROOT/data/"
+
+    private const val LEGACY_AUDIO_ROOT =
+        "$LEGACY_ROOT/quran-audio/"
+
+    private const val LEGACY_TAFSIR_ROOT =
+        "$LEGACY_ROOT/tafsir/"
+
+    private const val LEGACY_BACKUPS_ROOT =
+        "$LEGACY_ROOT/backups/"
+
+    private const val BUFFER_SIZE =
+        64 * 1024
+}
+
+    // -------------------------------------------------------------------------
+    // All-files access
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns whether MANAGE_EXTERNAL_STORAGE is currently granted.
+     *
+     * This is only relevant on Android 11+.
+     *
+     * The app does NOT require this permission for its normal MediaStore
+     * operation. It is retained because the existing JS API exposes it.
+     */
     @ReactMethod
     fun hasAllFilesAccess(promise: Promise) {
         try {
-            promise.resolve(
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            val granted =
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
                     Environment.isExternalStorageManager()
+
+            promise.resolve(granted)
+        } catch (e: Exception) {
+            promise.reject(
+                "ALL_FILES_ACCESS_CHECK_FAILED",
+                e.message,
+                e
             )
-        } catch (e: Exception) {
-            promise.reject("ALL_FILES_ACCESS_CHECK_FAILED", e.message, e)
-        }
-    }
-
-    @ReactMethod
-    fun requestAllFilesAccess(promise: Promise) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                !Environment.isExternalStorageManager()
-            ) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:${appContext.packageName}")
-                )
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                appContext.startActivity(intent)
-            }
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("ALL_FILES_ACCESS_REQUEST_FAILED", e.message, e)
-        }
-    }
-
-    @ReactMethod
-    fun openAyatFlowFolder(promise: Promise) {
-        try {
-            // On API 29+ the portable folder lives under Download/ (MediaStore
-            // requirement); on API 28- it's at the shared-storage root.
-            val dir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                File(sharedStorageRoot(), mediaStoreRoot)
-            } else {
-                File(sharedStorageRoot(), legacyRootDir)
-            }
-            dir.mkdirs()
-
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(Uri.fromFile(dir), "resource/folder")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-
-            if (intent.resolveActivity(appContext.packageManager) != null) {
-                appContext.startActivity(intent)
-                promise.resolve(true)
-            } else {
-                promise.resolve(false)
-            }
-        } catch (e: Exception) {
-            promise.reject("OPEN_FOLDER_FAILED", e.message, e)
-        }
-    }
-
-    /** Whether the AyatFlow folder already exists on shared storage. */
-    @ReactMethod
-    fun isAyatFlowFolderPresent(promise: Promise) {
-        try {
-            val root = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                File(sharedStorageRoot(), mediaStoreRoot)
-            } else {
-                File(sharedStorageRoot(), legacyRootDir)
-            }
-            promise.resolve(root.exists())
-        } catch (e: Exception) {
-            promise.reject("FOLDER_CHECK_FAILED", e.message, e)
         }
     }
 
     /**
-     * Create the AyatFlow folder (and its subfolders) up front so it always
-     * exists even before the first data/audio write.
+     * Opens Android's settings page for this app's "All files access".
+     */
+    @ReactMethod
+    fun requestAllFilesAccess(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if (!Environment.isExternalStorageManager()) {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:${appContext.packageName}")
+                    ).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+
+                    appContext.startActivity(intent)
+                }
+            }
+
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject(
+                "ALL_FILES_ACCESS_REQUEST_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Folder helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Checks whether AyatFlow storage already contains something.
+     *
+     * On Android 10+ we query MediaStore instead of File.exists(), because
+     * RELATIVE_PATH storage is MediaStore-backed.
+     */
+    @ReactMethod
+    fun isAyatFlowFolderPresent(promise: Promise) {
+        try {
+            val exists = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                mediaStorePathExists(MEDIASTORE_ROOT)
+            } else {
+                legacyAyatFlowRoot().exists()
+            }
+
+            promise.resolve(exists)
+        } catch (e: Exception) {
+            promise.reject(
+                "FOLDER_CHECK_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    /**
+     * Ensures the canonical AyatFlow storage structure exists and migrates any
+     * files left in the legacy (pre-canonical) locations.
+     *
+     * Android 10+:
+     * - Moves data files found in the old duplicated-prefix locations
+     *   (Download/AyatFlow/data/AyatFlow/data/ and Download/AyatFlow/data/data/)
+     *   into Download/AyatFlow/data/.
+     * - Moves the old backup at Download/AyatFlow/ayah-flow-backup.json into
+     *   Download/AyatFlow/backups/.
+     * - Inserts a small durable anchor file into every canonical directory so
+     *   MediaStore indexes them and file managers show the folder tree even on
+     *   a pristine install with no user data yet. Anchors are never deleted.
+     *
+     * Android 9 and below:
+     * - Moves the legacy /storage/emulated/0/AyatFlow tree into
+     *   /storage/emulated/0/Download/AyatFlow.
+     * - Creates every canonical directory explicitly.
      */
     @ReactMethod
     fun ensureAyatFlowFolder(promise: Promise) {
         try {
-            val root = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                File(sharedStorageRoot(), mediaStoreRoot)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                migrateMediaStoreLayout()
+                ensureMediaStoreAnchors()
             } else {
-                File(sharedStorageRoot(), legacyRootDir)
+                migrateLegacyFilesystemLayout()
+                ensureLegacyFolders()
             }
-            File(root, "data").mkdirs()
-            File(root, "quran-audio").mkdirs()
-            File(root, "tafsir").mkdirs()
+
             promise.resolve(true)
         } catch (e: Exception) {
-            promise.reject("FOLDER_CREATE_FAILED", e.message, e)
+            promise.reject(
+                "FOLDER_CREATE_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Shared storage layout
-    // ---------------------------------------------------------------------
-
-    private val fileName = "ayah-flow-backup.json"
-
     /**
-     * MediaStore RELATIVE_PATH roots. The first segment MUST be an allowed
-     * primary directory (Download, Documents, Music, ...) — "AyatFlow/" alone
-     * is rejected by the system on Android 10+, which silently broke every
-     * backup/mirror write. Files land at:
+     * The old implementation attempted:
      *
-     * /storage/emulated/0/Download/AyatFlow/
+     * Uri.fromFile(dir)
+     *
+     * which is unsafe on modern Android and can throw FileUriExposedException.
+     *
+     * There is no universally reliable way to tell an arbitrary installed
+     * file manager to open a filesystem directory using a file:// URI.
+     *
+     * Instead, this method opens the system document picker at a reasonable
+     * location when possible.
+     *
+     * NOTE:
+     * Android 11+ intentionally prevents apps from requesting the Download
+     * root through ACTION_OPEN_DOCUMENT_TREE. This is therefore a picker,
+     * not a direct "open Download/AyatFlow" operation.
      */
-    private val mediaStoreRoot = "${Environment.DIRECTORY_DOWNLOADS}/AyatFlow/"
-    private val backupRelativePath = mediaStoreRoot
-    // JS passes the "data" subfolder as relativeDir, so the data root is the
-    // AyatFlow root — concatenating it with relativeDir yields "AyatFlow/data/".
-    private val dataRelativeRoot = mediaStoreRoot
-    private val audioRelativeRoot = "${mediaStoreRoot}quran-audio/"
-    private val tafsirRelativeRoot = "${mediaStoreRoot}tafsir/"
+    @ReactMethod
+    fun openAyatFlowFolder(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                }
 
-    /**
-     * Used by the legacy File API on Android 9 and below.
-     */
-    private val legacyRootDir = "AyatFlow"
+                if (intent.resolveActivity(appContext.packageManager) != null) {
+                    appContext.startActivity(intent)
+                    promise.resolve(true)
+                } else {
+                    promise.resolve(false)
+                }
+            } else {
+                promise.resolve(false)
+            }
+        } catch (e: Exception) {
+            promise.reject(
+                "OPEN_FOLDER_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
 
-    // ---------------------------------------------------------------------
-    // Data backup
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Backup
+    // -------------------------------------------------------------------------
 
     @ReactMethod
-    fun saveBackup(data: String, promise: Promise) {
+    fun saveBackup(
+        data: String,
+        promise: Promise
+    ) {
         try {
             if (data.isBlank()) {
                 promise.resolve(false)
@@ -211,15 +322,15 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 writeBytesViaMediaStore(
-                    bytes,
-                    backupRelativePath,
-                    fileName,
-                    "application/json"
+                    bytes = bytes,
+                    relPath = BACKUPS_ROOT,
+                    name = BACKUP_FILE_NAME,
+                    mimeType = "application/json"
                 )
             } else {
                 writeBytesLegacy(
                     bytes,
-                    "$legacyRootDir/$fileName"
+                    "$LEGACY_BACKUPS_ROOT$BACKUP_FILE_NAME"
                 )
             }
 
@@ -236,16 +347,17 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun loadBackup(promise: Promise) {
         try {
-            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                readBytesViaMediaStore(
-                    backupRelativePath,
-                    fileName
-                )
-            } else {
-                readLegacy(
-                    "$legacyRootDir/$fileName"
-                )
-            }
+            val data =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    readBytesViaMediaStore(
+                        BACKUPS_ROOT,
+                        BACKUP_FILE_NAME
+                    )
+                } else {
+                    readLegacy(
+                        "$LEGACY_BACKUPS_ROOT$BACKUP_FILE_NAME"
+                    )
+                }
 
             promise.resolve(
                 data?.toString(Charsets.UTF_8)
@@ -259,14 +371,19 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Per-file data mirroring
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /**
-     * Write one JSON data file into:
+     * Saves one JSON data file into Download/AyatFlow/data/.
      *
-     * /AyatFlow/data/
+     * `relativeDir` is a path relative to the data root (may be empty, which
+     * means the file lives directly in Download/AyatFlow/data/).
+     *
+     * IMPORTANT:
+     * Callers must NOT pass a full path such as "AyatFlow/data" or
+     * "Download/AyatFlow/data/..." — that duplicates the DATA_ROOT prefix.
      */
     @ReactMethod
     fun saveDataFile(
@@ -281,19 +398,22 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                 return
             }
 
+            validateDataRelativeDir(relativeDir)
+            validateFileName(dataFileName)
+
             val bytes = content.toByteArray(Charsets.UTF_8)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 writeBytesViaMediaStore(
-                    bytes,
-                    "$dataRelativeRoot$relativeDir/",
-                    dataFileName,
-                    "application/json"
+                    bytes = bytes,
+                    relPath = buildRelPath(DATA_ROOT, relativeDir),
+                    name = dataFileName,
+                    mimeType = "application/json"
                 )
             } else {
                 writeBytesLegacy(
                     bytes,
-                    "$legacyRootDir/$relativeDir/$dataFileName"
+                    buildLegacyRelPath(LEGACY_DATA_ROOT, relativeDir, dataFileName)
                 )
             }
 
@@ -314,16 +434,20 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                readBytesViaMediaStore(
-                    "$dataRelativeRoot$relativeDir/",
-                    dataFileName
-                )
-            } else {
-                readLegacy(
-                    "$legacyRootDir/$relativeDir/$dataFileName"
-                )
-            }
+            validateDataRelativeDir(relativeDir)
+            validateFileName(dataFileName)
+
+            val data =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    readBytesViaMediaStore(
+                        buildRelPath(DATA_ROOT, relativeDir),
+                        dataFileName
+                    )
+                } else {
+                    readLegacy(
+                        buildLegacyRelPath(LEGACY_DATA_ROOT, relativeDir, dataFileName)
+                    )
+                }
 
             promise.resolve(
                 data?.toString(Charsets.UTF_8)
@@ -344,53 +468,17 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val relPath =
-                "$dataRelativeRoot$relativeDir/"
+            validateDataRelativeDir(relativeDir)
+            validateFileName(dataFileName)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver = appContext.contentResolver
-
-                /**
-                 * Use MediaStore.Files rather than MediaStore.Downloads
-                 * because AyatFlow is stored at the shared-storage root.
-                 */
-                val collection =
-                    MediaStore.Files.getContentUri("external")
-
-                val selection =
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
-
-                val args = arrayOf(
-                    dataFileName,
-                    relPath
+                deleteMediaStoreFile(
+                    buildRelPath(DATA_ROOT, relativeDir),
+                    dataFileName
                 )
-
-                resolver.query(
-                    collection,
-                    arrayOf(MediaStore.MediaColumns._ID),
-                    selection,
-                    args,
-                    null
-                )?.use { cursor ->
-
-                    if (cursor.moveToFirst()) {
-                        val uri =
-                            ContentUris.withAppendedId(
-                                collection,
-                                cursor.getLong(0)
-                            )
-
-                        resolver.delete(
-                            uri,
-                            null,
-                            null
-                        )
-                    }
-                }
             } else {
                 deleteLegacy(
-                    "$legacyRootDir/$relativeDir/$dataFileName"
+                    buildLegacyRelPath(LEGACY_DATA_ROOT, relativeDir, dataFileName)
                 )
             }
 
@@ -404,18 +492,16 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Audio mirroring
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /**
-     * Copy a freshly downloaded file from app storage into:
+     * Copies an app-private audio file into shared storage.
      *
-     * /AyatFlow/quran-audio/...
-     *
-     * relativeDir looks like:
-     *
-     * Surah1/arabic
+     * IMPORTANT:
+     * This implementation streams the file instead of source.readBytes().
+     * That prevents large MP3 files from being duplicated entirely in RAM.
      */
     @ReactMethod
     fun saveAudioFile(
@@ -425,31 +511,36 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val source =
-                resolveSourceFile(sourcePath)
+            validateRelativePath(relativeDir)
+            validateFileName(audioName)
 
-            if (!source.exists() || source.length() == 0L) {
+            val source = resolveSourceFile(sourcePath)
+
+            if (!source.exists() || !source.isFile || source.length() == 0L) {
                 throw IOException(
                     "Source audio file missing or empty: $sourcePath"
                 )
             }
 
-            val bytes = source.readBytes()
-
-            val relPath =
-                "$audioRelativeRoot$relativeDir/"
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                writeBytesViaMediaStore(
-                    bytes,
+                val relPath =
+                    "$AUDIO_ROOT${cleanRelativePath(relativeDir)}/"
+
+                copyFileToMediaStore(
+                    source,
                     relPath,
                     audioName,
                     "audio/mpeg"
                 )
             } else {
-                writeBytesLegacy(
-                    bytes,
-                    "$legacyRootDir/$relativeDir/$audioName"
+                val destination = File(
+                    sharedStorageRoot(),
+                    buildLegacyRelPath(LEGACY_AUDIO_ROOT, relativeDir, audioName)
+                )
+
+                copyFile(
+                    source,
+                    destination
                 )
             }
 
@@ -464,10 +555,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Copy a file from shared storage back into app storage.
-     * Used during reinstall restore.
-     *
-     * destPath is a file:// URI inside the app's working directory.
+     * Restores a shared-storage audio file into app storage.
      */
     @ReactMethod
     fun restoreAudioFile(
@@ -477,28 +565,48 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val bytes =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    readBytesViaMediaStore(
-                        "$audioRelativeRoot$relativeDir/",
-                        audioName
-                    )
-                } else {
-                    readLegacy(
-                        "$legacyRootDir/$relativeDir/$audioName"
-                    )
+            validateRelativePath(relativeDir)
+            validateFileName(audioName)
+
+            val destination = resolveSourceFile(destPath)
+            destination.parentFile?.mkdirs()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val sourceUri = findMediaStoreUri(
+                    "$AUDIO_ROOT${cleanRelativePath(relativeDir)}/",
+                    audioName
+                )
+
+                if (sourceUri == null) {
+                    promise.resolve(false)
+                    return
                 }
 
-            if (bytes == null) {
-                promise.resolve(false)
-                return
+                appContext.contentResolver.openInputStream(
+                    sourceUri
+                )?.use { input ->
+                    FileOutputStream(destination).use { output ->
+                        copyStream(input, output)
+                    }
+                } ?: throw IOException(
+                    "Unable to open shared audio file"
+                )
+            } else {
+                val source = File(
+                    sharedStorageRoot(),
+                    buildLegacyRelPath(LEGACY_AUDIO_ROOT, relativeDir, audioName)
+                )
+
+                if (!source.exists() || !source.isFile) {
+                    promise.resolve(false)
+                    return
+                }
+
+                copyFile(
+                    source,
+                    destination
+                )
             }
-
-            val dest =
-                resolveSourceFile(destPath)
-
-            dest.parentFile?.mkdirs()
-            dest.writeBytes(bytes)
 
             promise.resolve(true)
         } catch (e: Exception) {
@@ -510,9 +618,6 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    /**
-     * Remove the shared-storage copy.
-     */
     @ReactMethod
     fun deleteAudioFile(
         relativeDir: String,
@@ -520,50 +625,17 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val relPath =
-                "$audioRelativeRoot$relativeDir/"
+            validateRelativePath(relativeDir)
+            validateFileName(audioName)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver =
-                    appContext.contentResolver
-
-                val collection =
-                    MediaStore.Files.getContentUri("external")
-
-                val selection =
-                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
-
-                val args = arrayOf(
-                    audioName,
-                    relPath
+                deleteMediaStoreFile(
+                    "$AUDIO_ROOT${cleanRelativePath(relativeDir)}/",
+                    audioName
                 )
-
-                resolver.query(
-                    collection,
-                    arrayOf(MediaStore.MediaColumns._ID),
-                    selection,
-                    args,
-                    null
-                )?.use { cursor ->
-
-                    if (cursor.moveToFirst()) {
-                        val uri =
-                            ContentUris.withAppendedId(
-                                collection,
-                                cursor.getLong(0)
-                            )
-
-                        resolver.delete(
-                            uri,
-                            null,
-                            null
-                        )
-                    }
-                }
             } else {
                 deleteLegacy(
-                    "$legacyRootDir/$relativeDir/$audioName"
+                    buildLegacyRelPath(LEGACY_AUDIO_ROOT, relativeDir, audioName)
                 )
             }
 
@@ -577,79 +649,25 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Audio listing
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
-    /**
-     * List every audio file in shared storage.
-     *
-     * Returns relative paths such as:
-     *
-     * quran-audio/Surah1/arabic/1.mp3
-     */
     @ReactMethod
     fun listAudioFiles(
         promise: Promise
     ) {
         try {
-            val result =
-                Arguments.createArray()
+            val result = Arguments.createArray()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver =
-                    appContext.contentResolver
-
-                val collection =
-                    MediaStore.Files.getContentUri("external")
-
-                val projection = arrayOf(
-                    MediaStore.MediaColumns.DISPLAY_NAME,
-                    MediaStore.MediaColumns.RELATIVE_PATH
-                )
-
-                val selection =
-                    "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-
-                val args =
-                    arrayOf("$audioRelativeRoot%")
-
-                resolver.query(
-                    collection,
-                    projection,
-                    selection,
-                    args,
-                    null
-                )?.use { cursor ->
-
-                    val nameCol =
-                        cursor.getColumnIndexOrThrow(
-                            MediaStore.MediaColumns.DISPLAY_NAME
-                        )
-
-                    val pathCol =
-                        cursor.getColumnIndexOrThrow(
-                            MediaStore.MediaColumns.RELATIVE_PATH
-                        )
-
-                    while (cursor.moveToNext()) {
-                        val name =
-                            cursor.getString(nameCol)
-                                ?: continue
-
-                        val rel =
-                            cursor.getString(pathCol)
-                                ?: continue
-
-                        result.pushString(
-                            "quran-audio/${rel.removePrefix(audioRelativeRoot)}$name"
-                        )
-                    }
-                }
-            } else {
-                collectAudioFilesLegacy(
+                listMediaStoreFiles(
+                    AUDIO_ROOT,
+                    "quran-audio/",
                     result
                 )
+            } else {
+                collectAudioFilesLegacy(result)
             }
 
             promise.resolve(result)
@@ -662,15 +680,10 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Tafsir cache mirroring
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Tafsir
+    // -------------------------------------------------------------------------
 
-    /**
-     * Write one tafsir cache file into:
-     *
-     * /AyatFlow/tafsir/{language}/{surahNumber}.json
-     */
     @ReactMethod
     fun saveTafsirFile(
         language: String,
@@ -684,20 +697,22 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                 return
             }
 
+            validateSimpleSegment(language)
+            validateFileName("$surahNumber.json")
+
             val bytes = content.toByteArray(Charsets.UTF_8)
-            val relPath = "$tafsirRelativeRoot$language/"
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 writeBytesViaMediaStore(
-                    bytes,
-                    relPath,
-                    "$surahNumber.json",
-                    "application/json"
+                    bytes = bytes,
+                    relPath = "$TAFSIR_ROOT$language/",
+                    name = "$surahNumber.json",
+                    mimeType = "application/json"
                 )
             } else {
                 writeBytesLegacy(
                     bytes,
-                    "$legacyRootDir/tafsir/$language/$surahNumber.json"
+                    "$LEGACY_TAFSIR_ROOT$language/$surahNumber.json"
                 )
             }
 
@@ -718,16 +733,20 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                readBytesViaMediaStore(
-                    "$tafsirRelativeRoot$language/",
-                    "$surahNumber.json"
-                )
-            } else {
-                readLegacy(
-                    "$legacyRootDir/tafsir/$language/$surahNumber.json"
-                )
-            }
+            validateSimpleSegment(language)
+            validateFileName("$surahNumber.json")
+
+            val data =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    readBytesViaMediaStore(
+                        "$TAFSIR_ROOT$language/",
+                        "$surahNumber.json"
+                    )
+                } else {
+                    readLegacy(
+                        "$LEGACY_TAFSIR_ROOT$language/$surahNumber.json"
+                    )
+                }
 
             promise.resolve(
                 data?.toString(Charsets.UTF_8)
@@ -741,86 +760,32 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    /**
-     * List every tafsir cache file in shared storage.
-     *
-     * Returns relative paths such as:
-     *
-     * tafsir/urdu/7.json
-     */
     @ReactMethod
     fun listTafsirFiles(
         promise: Promise
     ) {
         try {
-            val result =
-                Arguments.createArray()
+            val result = Arguments.createArray()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver =
-                    appContext.contentResolver
-
-                val collection =
-                    MediaStore.Files.getContentUri("external")
-
-                val projection = arrayOf(
-                    MediaStore.MediaColumns.DISPLAY_NAME,
-                    MediaStore.MediaColumns.RELATIVE_PATH
+                listMediaStoreFiles(
+                    TAFSIR_ROOT,
+                    "",
+                    result
                 )
-
-                val selection =
-                    "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-
-                val args =
-                    arrayOf("$tafsirRelativeRoot%")
-
-                resolver.query(
-                    collection,
-                    projection,
-                    selection,
-                    args,
-                    null
-                )?.use { cursor ->
-
-                    val nameCol =
-                        cursor.getColumnIndexOrThrow(
-                            MediaStore.MediaColumns.DISPLAY_NAME
-                        )
-
-                    val pathCol =
-                        cursor.getColumnIndexOrThrow(
-                            MediaStore.MediaColumns.RELATIVE_PATH
-                        )
-
-                    while (cursor.moveToNext()) {
-                        val name =
-                            cursor.getString(nameCol)
-                                ?: continue
-
-                        val rel =
-                            cursor.getString(pathCol)
-                                ?: continue
-
-                        result.pushString(
-                            "${rel.removePrefix(tafsirRelativeRoot)}$name"
-                        )
-                    }
-                }
             } else {
-                val root =
-                    File(
-                        legacyAyatFlowRoot(),
-                        "tafsir"
-                    )
+                val root = File(
+                    legacyAyatFlowRoot(),
+                    "tafsir"
+                )
 
                 if (root.exists()) {
                     root.listFiles()?.forEach { langDir ->
-                        if (!langDir.isDirectory) {
-                            return@forEach
-                        }
+                        if (!langDir.isDirectory) return@forEach
 
                         langDir.listFiles()?.forEach { file ->
-                            if (file.isFile &&
+                            if (
+                                file.isFile &&
                                 file.name.endsWith(".json")
                             ) {
                                 result.pushString(
@@ -842,13 +807,10 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Zip audio files
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Zip audio
+    // -------------------------------------------------------------------------
 
-    /**
-     * Zip a directory of downloaded audio files.
-     */
     @ReactMethod
     fun zipAudioFiles(
         sourceDirPath: String,
@@ -856,10 +818,10 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            val sourceDir =
-                resolveSourceFile(sourceDirPath)
+            val sourceDir = resolveSourceFile(sourceDirPath)
 
-            if (!sourceDir.exists() ||
+            if (
+                !sourceDir.exists() ||
                 !sourceDir.isDirectory
             ) {
                 throw IOException(
@@ -872,7 +834,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                     .walkTopDown()
                     .filter {
                         it.isDirectory &&
-                        it != sourceDir
+                            it != sourceDir
                     }
                     .map {
                         it.absolutePath
@@ -900,13 +862,6 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    /**
-     * Zip only selected language folders.
-     *
-     * Example:
-     *
-     * ["Surah1/arabic", "Surah2/english"]
-     */
     @ReactMethod
     fun zipAudioSelection(
         audioRootPath: String,
@@ -918,7 +873,8 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
             val audioRoot =
                 resolveSourceFile(audioRootPath)
 
-            if (!audioRoot.exists() ||
+            if (
+                !audioRoot.exists() ||
                 !audioRoot.isDirectory
             ) {
                 throw IOException(
@@ -926,36 +882,37 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                 )
             }
 
-            val dest =
+            val destination =
                 resolveSourceFile(zipPath)
 
-            dest.parentFile?.mkdirs()
+            destination.parentFile?.mkdirs()
 
-            if (dest.exists()) {
-                dest.delete()
+            if (destination.exists()) {
+                destination.delete()
             }
 
-            val base =
-                audioRoot.absolutePath
-
-            val buffer =
-                ByteArray(64 * 1024)
+            val base = audioRoot.absolutePath
 
             ZipOutputStream(
                 BufferedOutputStream(
-                    FileOutputStream(dest)
+                    FileOutputStream(destination)
                 )
             ).use { zip ->
+
+                val buffer = ByteArray(BUFFER_SIZE)
 
                 for (i in 0 until includes.size()) {
                     val rel =
                         includes.getString(i)
                             ?: continue
 
-                    val dir =
-                        File(audioRoot, rel)
+                    val dir = File(
+                        audioRoot,
+                        rel
+                    )
 
-                    if (!dir.exists() ||
+                    if (
+                        !dir.exists() ||
                         !dir.isDirectory
                     ) {
                         continue
@@ -967,7 +924,8 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                             return@forEach
                         }
 
-                        if (file.name.endsWith(".part") ||
+                        if (
+                            file.name.endsWith(".part") ||
                             file.name.endsWith(".tmp")
                         ) {
                             return@forEach
@@ -982,9 +940,8 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                             ZipEntry(relPath)
                         )
 
-                        file.inputStream().use { input ->
-                            var read =
-                                input.read(buffer)
+                        FileInputStream(file).use { input ->
+                            var read = input.read(buffer)
 
                             while (read != -1) {
                                 zip.write(
@@ -993,8 +950,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                                     read
                                 )
 
-                                read =
-                                    input.read(buffer)
+                                read = input.read(buffer)
                             }
                         }
 
@@ -1004,7 +960,7 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
             }
 
             promise.resolve(
-                dest.absolutePath
+                destination.absolutePath
             )
         } catch (e: Exception) {
             promise.reject(
@@ -1015,17 +971,18 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
-    // MediaStore helpers — Android 10+
-    // ---------------------------------------------------------------------
+    // =========================================================================
+    // MediaStore — Android 10+
+    // =========================================================================
 
-    /**
-     * Uses MediaStore.Files because AyatFlow is a general-purpose application
-     * data directory rather than a Downloads-specific directory.
-     */
-    private fun getSharedFilesCollection() =
+    private fun getSharedFilesCollection(): Uri =
         MediaStore.Files.getContentUri("external")
 
+    /**
+     * Writes a byte array to MediaStore.
+     *
+     * Used for small JSON files and markers.
+     */
     private fun writeBytesViaMediaStore(
         bytes: ByteArray,
         relPath: String,
@@ -1038,31 +995,13 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         val collection =
             getSharedFilesCollection()
 
-        val selection =
-            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-            "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
-
-        val args =
-            arrayOf(name, relPath)
-
         var uri =
-            resolver.query(
-                collection,
-                arrayOf(MediaStore.MediaColumns._ID),
-                selection,
-                args,
-                null
-            )?.use { cursor ->
+            findMediaStoreUri(
+                relPath,
+                name
+            )
 
-                if (cursor.moveToFirst()) {
-                    ContentUris.withAppendedId(
-                        collection,
-                        cursor.getLong(0)
-                    )
-                } else {
-                    null
-                }
-            }
+        var createdNew = false
 
         if (uri == null) {
             val values =
@@ -1079,10 +1018,13 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
 
                     put(
                         MediaStore.MediaColumns.RELATIVE_PATH,
-                        relPath
+                        normalizeRelativePath(relPath)
                     )
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    if (
+                        Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.Q
+                    ) {
                         put(
                             MediaStore.MediaColumns.IS_PENDING,
                             1
@@ -1090,12 +1032,22 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                     }
                 }
 
-            uri =
-                resolver.insert(
-                    collection,
-                    values
+            uri = resolver.insert(
+                collection,
+                values
+            )
+
+            if (uri == null) {
+                throw IOException(
+                    "Failed to create MediaStore file: $name"
                 )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            }
+
+            createdNew = true
+        } else if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.Q
+        ) {
             val pending =
                 ContentValues().apply {
                     put(
@@ -1112,21 +1064,142 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
             )
         }
 
+        try {
+            resolver.openOutputStream(
+                uri,
+                "w"
+            )?.use { output ->
+                output.write(bytes)
+                output.flush()
+            } ?: throw IOException(
+                "Failed to open MediaStore file for writing: $name"
+            )
+
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.Q
+            ) {
+                val done =
+                    ContentValues().apply {
+                        put(
+                            MediaStore.MediaColumns.IS_PENDING,
+                            0
+                        )
+                    }
+
+                resolver.update(
+                    uri,
+                    done,
+                    null,
+                    null
+                )
+            }
+        } catch (e: Exception) {
+            if (createdNew) {
+                runCatching {
+                    resolver.delete(
+                        uri,
+                        null,
+                        null
+                    )
+                }
+            }
+
+            throw e
+        }
+    }
+
+    /**
+     * Streams a potentially large file into MediaStore.
+     */
+    private fun copyFileToMediaStore(
+        source: File,
+        relPath: String,
+        name: String,
+        mimeType: String
+    ) {
+        val resolver =
+            appContext.contentResolver
+
+        val collection =
+            getSharedFilesCollection()
+
+        var uri =
+            findMediaStoreUri(
+                relPath,
+                name
+            )
+
+        var createdNew = false
+
         if (uri == null) {
-            throw IOException(
-                "Failed to create file in shared storage"
+            val values =
+                ContentValues().apply {
+                    put(
+                        MediaStore.MediaColumns.DISPLAY_NAME,
+                        name
+                    )
+
+                    put(
+                        MediaStore.MediaColumns.MIME_TYPE,
+                        mimeType
+                    )
+
+                    put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        normalizeRelativePath(relPath)
+                    )
+
+                    put(
+                        MediaStore.MediaColumns.IS_PENDING,
+                        1
+                    )
+                }
+
+            uri = resolver.insert(
+                collection,
+                values
+            )
+
+            if (uri == null) {
+                throw IOException(
+                    "Failed to create MediaStore audio file: $name"
+                )
+            }
+
+            createdNew = true
+        } else {
+            val pending =
+                ContentValues().apply {
+                    put(
+                        MediaStore.MediaColumns.IS_PENDING,
+                        1
+                    )
+                }
+
+            resolver.update(
+                uri,
+                pending,
+                null,
+                null
             )
         }
 
-        resolver.openOutputStream(
-            uri
-        )?.use { output ->
-            output.write(bytes)
-        } ?: throw IOException(
-            "Failed to open file in shared storage for writing"
-        )
+        try {
+            FileInputStream(source).use { input ->
+                resolver.openOutputStream(
+                    uri,
+                    "w"
+                )?.use { output ->
+                    copyStream(
+                        input,
+                        output
+                    )
+                } ?: throw IOException(
+                    "Failed to open MediaStore audio output"
+                )
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val done =
                 ContentValues().apply {
                     put(
@@ -1141,6 +1214,18 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                 null,
                 null
             )
+        } catch (e: Exception) {
+            if (createdNew) {
+                runCatching {
+                    resolver.delete(
+                        uri,
+                        null,
+                        null
+                    )
+                }
+            }
+
+            throw e
         }
     }
 
@@ -1148,83 +1233,544 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         relPath: String,
         name: String
     ): ByteArray? {
+        val uri =
+            findMediaStoreUri(
+                relPath,
+                name
+            ) ?: return null
 
+        return appContext.contentResolver
+            .openInputStream(uri)
+            ?.use { input ->
+                input.readBytes()
+            }
+    }
+
+    private fun findMediaStoreUri(
+        relPath: String,
+        name: String
+    ): Uri? {
         val resolver =
             appContext.contentResolver
 
         val collection =
             getSharedFilesCollection()
 
+        val normalizedPath =
+            normalizeRelativePath(relPath)
+
         val selection =
             "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
-            "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+                "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
 
         val args =
-            arrayOf(name, relPath)
+            arrayOf(
+                name,
+                normalizedPath
+            )
 
         resolver.query(
             collection,
-            arrayOf(MediaStore.MediaColumns._ID),
+            arrayOf(
+                MediaStore.MediaColumns._ID
+            ),
             selection,
             args,
             null
         )?.use { cursor ->
 
             if (cursor.moveToFirst()) {
-                val uri =
-                    ContentUris.withAppendedId(
-                        collection,
-                        cursor.getLong(0)
-                    )
-
-                return resolver
-                    .openInputStream(uri)
-                    ?.use { input ->
-                        input.readBytes()
-                    }
+                return ContentUris.withAppendedId(
+                    collection,
+                    cursor.getLong(0)
+                )
             }
         }
 
         return null
     }
 
-    // ---------------------------------------------------------------------
-    // Legacy File helpers — Android 9 and below
-    // ---------------------------------------------------------------------
+    private fun deleteMediaStoreFile(
+        relPath: String,
+        name: String
+    ) {
+        val resolver =
+            appContext.contentResolver
 
-    /**
-     * Shared external-storage root:
-     *
-     * /storage/emulated/0/
-     */
-    private fun sharedStorageRoot(): File {
-        return Environment.getExternalStorageDirectory()
-    }
+        val uri =
+            findMediaStoreUri(
+                relPath,
+                name
+            ) ?: return
 
-    /**
-     * Actual AyatFlow directory:
-     *
-     * /storage/emulated/0/AyatFlow/
-     */
-    private fun legacyAyatFlowRoot(): File {
-        return File(
-            sharedStorageRoot(),
-            legacyRootDir
+        resolver.delete(
+            uri,
+            null,
+            null
         )
     }
+
+    /**
+     * Determines whether MediaStore contains anything beneath a RELATIVE_PATH.
+     */
+    private fun mediaStorePathExists(
+        relPath: String
+    ): Boolean {
+        val resolver =
+            appContext.contentResolver
+
+        val collection =
+            getSharedFilesCollection()
+
+        val normalized =
+            normalizeRelativePath(relPath)
+
+        val selection =
+            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+
+        val args =
+            arrayOf("$normalized%")
+
+        resolver.query(
+            collection,
+            arrayOf(
+                MediaStore.MediaColumns._ID
+            ),
+            selection,
+            args,
+            null
+        )?.use { cursor ->
+            return cursor.moveToFirst()
+        }
+
+        return false
+    }
+
+    private fun listMediaStoreFiles(
+        rootPath: String,
+        outputPrefix: String,
+        result: WritableArray
+    ) {
+        val resolver =
+            appContext.contentResolver
+
+        val collection =
+            getSharedFilesCollection()
+
+        val normalizedRoot =
+            normalizeRelativePath(rootPath)
+
+        val projection =
+            arrayOf(
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.RELATIVE_PATH
+            )
+
+        val selection =
+            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+
+        val args =
+            arrayOf("$normalizedRoot%")
+
+        resolver.query(
+            collection,
+            projection,
+            selection,
+            args,
+            null
+        )?.use { cursor ->
+
+            val nameCol =
+                cursor.getColumnIndex(
+                    MediaStore.MediaColumns.DISPLAY_NAME
+                )
+
+            val pathCol =
+                cursor.getColumnIndex(
+                    MediaStore.MediaColumns.RELATIVE_PATH
+                )
+
+            if (
+                nameCol < 0 ||
+                pathCol < 0
+            ) {
+                return
+            }
+
+            if (cursor.moveToFirst()) {
+                do {
+                    val name =
+                    cursor.getString(nameCol)
+                        ?: continue
+
+                val rel =
+                    cursor.getString(pathCol)
+                        ?: continue
+
+                if (name == ".ayatflow") {
+                    continue
+                }
+
+                val relative =
+                    rel.removePrefix(normalizedRoot)
+
+                    result.pushString(
+                        "$outputPrefix$relative$name"
+                    )
+                } while (cursor.moveToNext())
+            }
+        }
+    }
+
+    /**
+     * Builds a MediaStore RELATIVE_PATH by joining a canonical root with an
+     * optional subdirectory.
+     *
+     * An empty `relativeDir` resolves to the root itself:
+     *
+     *   buildRelPath("Download/AyatFlow/data/", "")      -> "Download/AyatFlow/data/"
+     *   buildRelPath("Download/AyatFlow/data/", "misc")  -> "Download/AyatFlow/data/misc/"
+     */
+    private fun buildRelPath(
+        root: String,
+        relativeDir: String
+    ): String {
+        val clean =
+            cleanRelativePath(relativeDir)
+
+        if (clean.isEmpty()) {
+            return normalizeRelativePath(root)
+        }
+
+        return normalizeRelativePath(
+            "$root$clean/"
+        )
+    }
+
+    /**
+     * Builds a legacy (Android 9-) relative path by joining a canonical legacy
+     * root with an optional subdirectory and the file name.
+     */
+    private fun buildLegacyRelPath(
+        root: String,
+        relativeDir: String,
+        name: String
+    ): String {
+        val clean =
+            cleanRelativePath(relativeDir)
+
+        if (clean.isEmpty()) {
+            return "$root$name"
+        }
+
+        return "$root$clean/$name"
+    }
+
+    /**
+     * Guards the saveDataFile/readDataFile/deleteDataFile contract.
+     *
+     * `relativeDir` must be a path relative to Download/AyatFlow/data/ (or
+     * empty). Passing a full path such as "AyatFlow/data" or
+     * "Download/AyatFlow/data/..." would silently duplicate the DATA_ROOT
+     * prefix, so it is rejected here.
+     */
+    private fun validateDataRelativeDir(
+        dir: String
+    ) {
+        validateRelativePath(dir)
+
+        if (
+            dir.contains(
+                "AyatFlow",
+                ignoreCase = true
+            )
+        ) {
+            throw IllegalArgumentException(
+                "relativeDir must be relative to the data root, got: $dir"
+            )
+        }
+    }
+
+    // =========================================================================
+    // Canonical layout creation + migration
+    // =========================================================================
+
+    /**
+     * Known user-data file names inside Download/AyatFlow/data/.
+     */
+    private val DATA_FILE_NAMES =
+        listOf(
+            "bookmarks.json",
+            "surah-bookmarks.json",
+            "progress.json",
+            "audio-prefs.json",
+            "last.json",
+            "tafsir-language.json"
+        )
+
+    /**
+     * Subdirectories (relative to Download/AyatFlow/data/) that previous
+     * builds wrote data files into by duplicating the data prefix:
+     *
+     *   storage.ts used to pass "AyatFlow/data"  -> .../data/AyatFlow/data/
+     *   backup.ts  used to pass "data"          -> .../data/data/
+     */
+    private val LEGACY_NESTED_DATA_DIRS =
+        listOf(
+            "AyatFlow/data",
+            "data"
+        )
+
+    /**
+     * Migrates MediaStore files that previous builds placed in the wrong
+     * (duplicated-prefix) locations into the canonical layout.
+     *
+     * Idempotent and safe to run on every startup. Files are moved only when
+     * the canonical destination does not already exist.
+     */
+    private fun migrateMediaStoreLayout() {
+        for (name in DATA_FILE_NAMES) {
+            for (nested in LEGACY_NESTED_DATA_DIRS) {
+                val oldRelPath =
+                    "$DATA_ROOT$nested/"
+
+                if (
+                    findMediaStoreUri(
+                        oldRelPath,
+                        name
+                    ) == null
+                ) {
+                    continue
+                }
+
+                if (
+                    findMediaStoreUri(
+                        DATA_ROOT,
+                        name
+                    ) == null
+                ) {
+                    val bytes =
+                        readBytesViaMediaStore(
+                            oldRelPath,
+                            name
+                        )
+
+                    if (bytes != null) {
+                        writeBytesViaMediaStore(
+                            bytes,
+                            DATA_ROOT,
+                            name,
+                            "application/json"
+                        )
+                    }
+                }
+
+                deleteMediaStoreFile(
+                    oldRelPath,
+                    name
+                )
+            }
+        }
+
+        if (
+            findMediaStoreUri(
+                MEDIASTORE_ROOT,
+                BACKUP_FILE_NAME
+            ) != null
+        ) {
+            if (
+                findMediaStoreUri(
+                    BACKUPS_ROOT,
+                    BACKUP_FILE_NAME
+                ) == null
+            ) {
+                val bytes =
+                    readBytesViaMediaStore(
+                        MEDIASTORE_ROOT,
+                        BACKUP_FILE_NAME
+                    )
+
+                if (bytes != null) {
+                    writeBytesViaMediaStore(
+                        bytes,
+                        BACKUPS_ROOT,
+                        BACKUP_FILE_NAME,
+                        "application/json"
+                    )
+                }
+            }
+
+            deleteMediaStoreFile(
+                MEDIASTORE_ROOT,
+                BACKUP_FILE_NAME
+            )
+        }
+    }
+
+    /**
+     * Inserts a small durable anchor file into every canonical directory.
+     *
+     * MediaStore only indexes files, so a directory never materializes in
+     * file managers until at least one file has been written to it. The
+     * anchor guarantees that Download/AyatFlow/ (and every subdirectory)
+     * is visible even on a pristine install with no user data yet.
+     *
+     * Anchors are never deleted. All listing code skips ".ayatflow".
+     */
+    private fun ensureMediaStoreAnchors() {
+        val anchorDirs =
+            listOf(
+                MEDIASTORE_ROOT,
+                DATA_ROOT,
+                AUDIO_ROOT,
+                TAFSIR_ROOT,
+                BACKUPS_ROOT
+            )
+
+        for (dir in anchorDirs) {
+            if (
+                findMediaStoreUri(
+                    dir,
+                    ANCHOR_FILE_NAME
+                ) == null
+            ) {
+                writeBytesViaMediaStore(
+                    ByteArray(0),
+                    dir,
+                    ANCHOR_FILE_NAME,
+                    "application/octet-stream"
+                )
+            }
+        }
+    }
+
+    /**
+     * Moves the old legacy tree into the canonical location.
+     *
+     * Previous builds wrote to /storage/emulated/0/AyatFlow/. The canonical
+     * location is /storage/emulated/0/Download/AyatFlow/. Runs only on
+     * Android 9 and below, where the app has direct filesystem access.
+     */
+    private fun migrateLegacyFilesystemLayout() {
+        val oldRoot =
+            File(
+                sharedStorageRoot(),
+                "AyatFlow"
+            )
+
+        if (!oldRoot.exists()) {
+            return
+        }
+
+        val newRoot =
+            legacyAyatFlowRoot()
+
+        if (!newRoot.exists()) {
+            newRoot.parentFile?.mkdirs()
+
+            if (oldRoot.renameTo(newRoot)) {
+                return
+            }
+        }
+
+        // Both roots exist (or rename failed): merge any missing pieces.
+        for (sub in listOf("data", "quran-audio", "tafsir", "backups")) {
+            val source =
+                File(oldRoot, sub)
+
+            if (
+                source.exists() &&
+                !File(newRoot, sub).exists()
+            ) {
+                source.renameTo(
+                    File(newRoot, sub)
+                )
+            }
+        }
+
+        val oldBackup =
+            File(
+                oldRoot,
+                BACKUP_FILE_NAME
+            )
+
+        if (oldBackup.exists()) {
+            val backupsDir =
+                File(
+                    newRoot,
+                    "backups"
+                )
+
+            backupsDir.mkdirs()
+
+            val target =
+                File(
+                    backupsDir,
+                    BACKUP_FILE_NAME
+                )
+
+            if (target.exists()) {
+                oldBackup.delete()
+            } else {
+                oldBackup.renameTo(target)
+            }
+        }
+
+        oldRoot.listFiles()
+            ?.takeIf { it.isEmpty() }
+            ?.let { oldRoot.delete() }
+    }
+
+    /**
+     * Creates every canonical directory explicitly on Android 9 and below.
+     */
+    private fun ensureLegacyFolders() {
+        val root =
+            legacyAyatFlowRoot()
+
+        root.mkdirs()
+
+        for (sub in listOf("data", "quran-audio", "tafsir", "backups")) {
+            File(root, sub).mkdirs()
+        }
+    }
+
+    // =========================================================================
+    // Legacy storage — Android 9 and below
+    // =========================================================================
+
+    private fun sharedStorageRoot(): File =
+        Environment.getExternalStorageDirectory()
+
+    /**
+     * Canonical legacy root:
+     *
+     * /storage/emulated/0/Download/AyatFlow
+     *
+     * (LEGACY_ROOT = "Download/AyatFlow" is relative to the storage root.)
+     */
+    private fun legacyAyatFlowRoot(): File =
+        File(
+            sharedStorageRoot(),
+            LEGACY_ROOT
+        )
 
     private fun writeBytesLegacy(
         bytes: ByteArray,
         relativePath: String
     ) {
-        val dest =
+        val destination =
             File(
                 sharedStorageRoot(),
                 relativePath
             )
 
-        dest.parentFile?.mkdirs()
-        dest.writeBytes(bytes)
+        destination.parentFile?.mkdirs()
+
+        FileOutputStream(destination).use { output ->
+            output.write(bytes)
+            output.flush()
+        }
     }
 
     private fun readLegacy(
@@ -1236,11 +1782,11 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                 relativePath
             )
 
-        return if (file.exists()) {
-            file.readBytes()
-        } else {
-            null
+        if (!file.exists() || !file.isFile) {
+            return null
         }
+
+        return file.readBytes()
     }
 
     private fun deleteLegacy(
@@ -1293,7 +1839,10 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
                     out
                 )
             } else if (
-                file.name.endsWith(".mp3")
+                file.name.endsWith(
+                    ".mp3",
+                    ignoreCase = true
+                )
             ) {
                 out.pushString(
                     "quran-audio/$rel"
@@ -1302,107 +1851,282 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // ---------------------------------------------------------------------
-    // SAF helpers — operate on the folder the user granted via the system
-    // folder picker. DocumentFile descends into subfolders correctly, which
-    // expo's JS SAF layer cannot do, so all folder-backed mirror/restore
-    // goes through these methods.
-    // ---------------------------------------------------------------------
+    // =========================================================================
+    // SAF
+    // =========================================================================
 
-    private fun safTreeRoot(treeUri: String): DocumentFile? =
-        runCatching { DocumentFile.fromTreeUri(appContext, Uri.parse(treeUri)) }.getOrNull()
+    /**
+     * Converts a persisted tree URI into DocumentFile.
+     */
+    private fun safTreeRoot(
+        treeUri: String
+    ): DocumentFile? {
+        return runCatching {
+            DocumentFile.fromTreeUri(
+                appContext,
+                Uri.parse(treeUri)
+            )
+        }.getOrNull()
+    }
 
-    private fun safResolve(treeUri: String, relativePath: String): DocumentFile? {
-        val root = safTreeRoot(treeUri) ?: return null
+    private fun safResolve(
+        treeUri: String,
+        relativePath: String
+    ): DocumentFile? {
+        val root =
+            safTreeRoot(treeUri)
+                ?: return null
+
         var current = root
-        for (segment in relativePath.split("/")) {
-            if (segment.isBlank()) continue
-            current = current.findFile(segment) ?: return null
+
+        for (
+            segment in
+            relativePath
+                .split("/")
+                .filter { it.isNotBlank() }
+        ) {
+            current =
+                current.findFile(segment)
+                    ?: return null
         }
+
         return current
     }
 
-    private fun mimeFor(name: String): String = when {
-        name.endsWith(".mp3") -> "audio/mpeg"
-        name.endsWith(".json") -> "application/json"
-        else -> "application/octet-stream"
-    }
+    private fun mimeFor(
+        name: String
+    ): String =
+        when {
+            name.endsWith(
+                ".mp3",
+                ignoreCase = true
+            ) -> "audio/mpeg"
 
-    /** Find `relativePath` inside the granted folder, creating missing dirs/files. */
-    private fun safEnsureFile(treeUri: String, relativePath: String): DocumentFile? {
-        val root = safTreeRoot(treeUri) ?: return null
+            name.endsWith(
+                ".json",
+                ignoreCase = true
+            ) -> "application/json"
+
+            name.endsWith(
+                ".zip",
+                ignoreCase = true
+            ) -> "application/zip"
+
+            else ->
+                "application/octet-stream"
+        }
+
+    /**
+     * Creates every directory/file required by a SAF relative path.
+     */
+    private fun safEnsureFile(
+        treeUri: String,
+        relativePath: String
+    ): DocumentFile? {
+        val root =
+            safTreeRoot(treeUri)
+                ?: return null
+
         var current = root
-        val segments = relativePath.split("/").filter { it.isNotBlank() }
+
+        val segments =
+            relativePath
+                .split("/")
+                .filter { it.isNotBlank() }
+
+        if (segments.isEmpty()) {
+            return current
+        }
+
         for (i in segments.indices) {
-            val segment = segments[i]
-            val isLast = i == segments.lastIndex
-            var child = current.findFile(segment)
+            val segment =
+                segments[i]
+
+            val isLast =
+                i == segments.lastIndex
+
+            var child =
+                current.findFile(segment)
+
             if (child == null) {
-                child = if (isLast) {
-                    current.createFile(mimeFor(segment), segment)
-                } else {
-                    current.createDirectory(segment)
-                } ?: return null
+                child =
+                    if (isLast) {
+                        current.createFile(
+                            mimeFor(segment),
+                            segment
+                        )
+                    } else {
+                        current.createDirectory(
+                            segment
+                        )
+                    }
+
+                if (child == null) {
+                    return null
+                }
             }
+
             current = child
         }
+
         return current
     }
 
     @ReactMethod
-    fun safWriteTextFile(treeUri: String, relativePath: String, content: String, promise: Promise) {
+    fun safWriteTextFile(
+        treeUri: String,
+        relativePath: String,
+        content: String,
+        promise: Promise
+    ) {
         try {
-            val file = safEnsureFile(treeUri, relativePath)
-            if (file == null) {
+            val file =
+                safEnsureFile(
+                    treeUri,
+                    relativePath
+                )
+
+            if (
+                file == null ||
+                !file.canWrite()
+            ) {
                 promise.resolve(false)
                 return
             }
-            appContext.contentResolver.openOutputStream(file.uri, "wt")?.use { output ->
-                output.write(content.toByteArray(Charsets.UTF_8))
-            } ?: throw IOException("Failed to open $relativePath for writing")
+
+            appContext.contentResolver
+                .openOutputStream(
+                    file.uri,
+                    "w"
+                )
+                ?.use { output ->
+                    output.write(
+                        content.toByteArray(
+                            Charsets.UTF_8
+                        )
+                    )
+
+                    output.flush()
+                }
+                ?: throw IOException(
+                    "Failed to open $relativePath for writing"
+                )
+
             promise.resolve(true)
         } catch (e: Exception) {
-            promise.reject("SAF_WRITE_FAILED", e.message, e)
+            promise.reject(
+                "SAF_WRITE_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
     @ReactMethod
-    fun safReadTextFile(treeUri: String, relativePath: String, promise: Promise) {
+    fun safReadTextFile(
+        treeUri: String,
+        relativePath: String,
+        promise: Promise
+    ) {
         try {
-            val file = safResolve(treeUri, relativePath)
-            if (file == null || !file.isFile) {
+            val file =
+                safResolve(
+                    treeUri,
+                    relativePath
+                )
+
+            if (
+                file == null ||
+                !file.isFile
+            ) {
                 promise.resolve(null)
                 return
             }
-            val text = appContext.contentResolver.openInputStream(file.uri)?.use { input ->
-                input.readBytes().toString(Charsets.UTF_8)
-            }
+
+            val text =
+                appContext.contentResolver
+                    .openInputStream(file.uri)
+                    ?.use { input ->
+                        input.readBytes()
+                            .toString(
+                                Charsets.UTF_8
+                            )
+                    }
+
             promise.resolve(text)
         } catch (e: Exception) {
-            promise.reject("SAF_READ_FAILED", e.message, e)
+            promise.reject(
+                "SAF_READ_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
     @ReactMethod
-    fun safListFiles(treeUri: String, relativePath: String, promise: Promise) {
+    fun safListFiles(
+        treeUri: String,
+        relativePath: String,
+        promise: Promise
+    ) {
         try {
-            val root = safResolve(treeUri, relativePath) ?: safTreeRoot(treeUri)
-            val result = Arguments.createArray()
-            if (root != null && root.isDirectory) {
-                collectSafFiles(root, relativePath.trimEnd('/'), result)
+            val root =
+                if (relativePath.isBlank()) {
+                    safTreeRoot(treeUri)
+                } else {
+                    safResolve(
+                        treeUri,
+                        relativePath
+                    )
+                }
+
+            val result =
+                Arguments.createArray()
+
+            if (
+                root != null &&
+                root.isDirectory
+            ) {
+                collectSafFiles(
+                    root,
+                    relativePath.trimEnd('/'),
+                    result
+                )
             }
+
             promise.resolve(result)
         } catch (e: Exception) {
-            promise.reject("SAF_LIST_FAILED", e.message, e)
+            promise.reject(
+                "SAF_LIST_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
-    private fun collectSafFiles(dir: DocumentFile, prefix: String, out: WritableArray) {
+    private fun collectSafFiles(
+        dir: DocumentFile,
+        prefix: String,
+        out: WritableArray
+    ) {
         for (child in dir.listFiles()) {
-            val name = child.name ?: continue
-            val rel = if (prefix.isEmpty()) name else "$prefix/$name"
+            val name =
+                child.name
+                    ?: continue
+
+            val rel =
+                if (prefix.isEmpty()) {
+                    name
+                } else {
+                    "$prefix/$name"
+                }
+
             if (child.isDirectory) {
-                collectSafFiles(child, rel, out)
+                collectSafFiles(
+                    child,
+                    rel,
+                    out
+                )
             } else {
                 out.pushString(rel)
             }
@@ -1410,62 +2134,387 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun safDeleteFile(treeUri: String, relativePath: String, promise: Promise) {
+    fun safDeleteFile(
+        treeUri: String,
+        relativePath: String,
+        promise: Promise
+    ) {
         try {
-            safResolve(treeUri, relativePath)?.delete()
+            val file =
+                safResolve(
+                    treeUri,
+                    relativePath
+                )
+
+            if (file != null) {
+                file.delete()
+            }
+
             promise.resolve(true)
         } catch (e: Exception) {
-            promise.reject("SAF_DELETE_FAILED", e.message, e)
+            promise.reject(
+                "SAF_DELETE_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
-    /** Copy a file from the granted folder back into app storage (audio restore). */
+    /**
+     * Copies a file from a granted SAF tree into app storage.
+     */
     @ReactMethod
-    fun safCopyFileToApp(treeUri: String, relativePath: String, destPath: String, promise: Promise) {
+    fun safCopyFileToApp(
+        treeUri: String,
+        relativePath: String,
+        destPath: String,
+        promise: Promise
+    ) {
         try {
-            val file = safResolve(treeUri, relativePath)
-            if (file == null || !file.isFile) {
+            val file =
+                safResolve(
+                    treeUri,
+                    relativePath
+                )
+
+            if (
+                file == null ||
+                !file.isFile
+            ) {
                 promise.resolve(false)
                 return
             }
-            val dest = resolveSourceFile(destPath)
-            dest.parentFile?.mkdirs()
-            appContext.contentResolver.openInputStream(file.uri)?.use { input ->
-                dest.writeBytes(input.readBytes())
-            } ?: throw IOException("Failed to read $relativePath")
+
+            val destination =
+                resolveSourceFile(destPath)
+
+            destination.parentFile?.mkdirs()
+
+            appContext.contentResolver
+                .openInputStream(file.uri)
+                ?.use { input ->
+                    FileOutputStream(
+                        destination
+                    ).use { output ->
+                        copyStream(
+                            input,
+                            output
+                        )
+                    }
+                }
+                ?: throw IOException(
+                    "Failed to read $relativePath"
+                )
+
             promise.resolve(true)
         } catch (e: Exception) {
-            promise.reject("SAF_COPY_FAILED", e.message, e)
+            promise.reject(
+                "SAF_COPY_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
-    /** Copy an app file into the granted folder (audio mirror on download). */
+    /**
+     * Copies an app file into a granted SAF tree.
+     *
+     * This also streams large MP3 files instead of loading the entire file
+     * into memory.
+     */
     @ReactMethod
-    fun safCopyFileFromApp(treeUri: String, relativePath: String, sourcePath: String, promise: Promise) {
+    fun safCopyFileFromApp(
+        treeUri: String,
+        relativePath: String,
+        sourcePath: String,
+        promise: Promise
+    ) {
         try {
-            val source = resolveSourceFile(sourcePath)
-            if (!source.exists() || source.length() == 0L) {
+            val source =
+                resolveSourceFile(sourcePath)
+
+            if (
+                !source.exists() ||
+                !source.isFile ||
+                source.length() == 0L
+            ) {
                 promise.resolve(false)
                 return
             }
-            val file = safEnsureFile(treeUri, relativePath)
-            if (file == null) {
+
+            val file =
+                safEnsureFile(
+                    treeUri,
+                    relativePath
+                )
+
+            if (
+                file == null ||
+                !file.canWrite()
+            ) {
                 promise.resolve(false)
                 return
             }
-            appContext.contentResolver.openOutputStream(file.uri, "wt")?.use { output ->
-                output.write(source.readBytes())
-            } ?: throw IOException("Failed to open $relativePath for writing")
+
+            FileInputStream(source).use { input ->
+                appContext.contentResolver
+                    .openOutputStream(
+                        file.uri,
+                        "wt"
+                    )
+                    ?.use { output ->
+                        copyStream(
+                            input,
+                            output
+                        )
+                    }
+                    ?: throw IOException(
+                        "Failed to open $relativePath for writing"
+                    )
+            }
+
             promise.resolve(true)
         } catch (e: Exception) {
-            promise.reject("SAF_COPY_FAILED", e.message, e)
+            promise.reject(
+                "SAF_COPY_FAILED",
+                e.message,
+                e
+            )
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Shared helpers
-    // ---------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // SAF permission helpers
+    // -------------------------------------------------------------------------
 
+    /**
+     * Persist the URI permission returned by ACTION_OPEN_DOCUMENT_TREE.
+     *
+     * JS can call this after receiving the selected tree URI.
+     */
+    @ReactMethod
+    fun safTakePersistablePermission(
+        treeUri: String,
+        promise: Promise
+    ) {
+        try {
+            val uri =
+                Uri.parse(treeUri)
+
+            val flags =
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+
+            appContext.contentResolver
+                .takePersistableUriPermission(
+                    uri,
+                    flags
+                )
+
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject(
+                "SAF_PERSIST_PERMISSION_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    /**
+     * Checks whether this app still has persisted access to a SAF URI.
+     */
+    @ReactMethod
+    fun safHasPersistedPermission(
+        treeUri: String,
+        promise: Promise
+    ) {
+        try {
+            val target =
+                Uri.parse(treeUri)
+
+            val hasPermission =
+                appContext.contentResolver
+                    .persistedUriPermissions
+                    .any { permission ->
+                        permission.uri == target &&
+                            permission.isReadPermission &&
+                            permission.isWritePermission
+                    }
+
+            promise.resolve(hasPermission)
+        } catch (e: Exception) {
+            promise.reject(
+                "SAF_PERMISSION_CHECK_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    /**
+     * Returns persisted SAF tree/document URI strings.
+     */
+    @ReactMethod
+    fun safGetPersistedPermissions(
+        promise: Promise
+    ) {
+        try {
+            val result =
+                Arguments.createArray()
+
+            appContext.contentResolver
+                .persistedUriPermissions
+                .forEach { permission ->
+                    result.pushString(
+                        permission.uri.toString()
+                    )
+                }
+
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject(
+                "SAF_PERMISSION_LIST_FAILED",
+                e.message,
+                e
+            )
+        }
+    }
+
+    // =========================================================================
+    // Shared utility functions
+    // =========================================================================
+
+    /**
+     * Stream data from input to output.
+     */
+    private fun copyStream(
+        input: InputStream,
+        output: OutputStream
+    ) {
+        val buffer =
+            ByteArray(BUFFER_SIZE)
+
+        var read =
+            input.read(buffer)
+
+        while (read != -1) {
+            output.write(
+                buffer,
+                0,
+                read
+            )
+
+            read =
+                input.read(buffer)
+        }
+
+        output.flush()
+    }
+
+    private fun copyFile(
+        source: File,
+        destination: File
+    ) {
+        destination.parentFile?.mkdirs()
+
+        FileInputStream(source).use { input ->
+            FileOutputStream(destination).use { output ->
+                copyStream(
+                    input,
+                    output
+                )
+            }
+        }
+    }
+
+    /**
+     * Normalizes a MediaStore RELATIVE_PATH.
+     *
+     * MediaStore paths must use '/' separators and end in '/'.
+     */
+    private fun normalizeRelativePath(
+        path: String
+    ): String {
+        var normalized =
+            path
+                .replace('\\', '/')
+                .trimStart('/')
+
+        if (!normalized.endsWith('/')) {
+            normalized += "/"
+        }
+
+        return normalized
+    }
+
+    private fun cleanRelativePath(
+        path: String
+    ): String {
+        return path
+            .replace('\\', '/')
+            .trim('/')
+    }
+
+    /**
+     * Prevent accidental ../ traversal from JS arguments.
+     */
+    private fun validateRelativePath(
+        path: String
+    ) {
+        val normalized =
+            path.replace('\\', '/')
+
+        if (
+            normalized.contains("..") ||
+            normalized.startsWith("/") ||
+            normalized.contains("//")
+        ) {
+            throw IllegalArgumentException(
+                "Invalid relative path: $path"
+            )
+        }
+    }
+
+    private fun validateFileName(
+        name: String
+    ) {
+        if (
+            name.isBlank() ||
+            name == "." ||
+            name == ".." ||
+            name.contains("/") ||
+            name.contains("\\")
+        ) {
+            throw IllegalArgumentException(
+                "Invalid file name: $name"
+            )
+        }
+    }
+
+    private fun validateSimpleSegment(
+        value: String
+    ) {
+        if (
+            value.isBlank() ||
+            value == "." ||
+            value == ".." ||
+            value.contains("/") ||
+            value.contains("\\")
+        ) {
+            throw IllegalArgumentException(
+                "Invalid path segment: $value"
+            )
+        }
+    }
+
+    /**
+     * Resolves:
+     *
+     * file:///...
+     *
+     * as well as normal filesystem paths.
+     */
     private fun resolveSourceFile(
         path: String
     ): File {
