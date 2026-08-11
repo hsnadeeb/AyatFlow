@@ -10,8 +10,7 @@ import {
 } from "react-native";
 import {
   markRestorePrompted,
-  promptForBackupFolder,
-  restoreBackupFromSafFolder,
+  restoreEverything,
 } from "../backup";
 import { radii, useTheme, useThemedStyles } from "../theme";
 
@@ -22,10 +21,9 @@ type Props = {
 };
 
 /**
- * One-time prompt shown after an uninstall/reinstall: Android 10+ makes
- * MediaStore backup files unreadable after reinstall, so the user is asked to
- * re-grant access to their backup folder via the system folder picker
- * (Storage Access Framework).
+ * One-time prompt after an uninstall/reinstall: a previous backup was found
+ * in shared storage, so the user is asked whether to restore everything.
+ * The restore itself is fully automatic — no folder picker involved.
  */
 export default function RestorePrompt({ visible, onDismiss, onRestored }: Props) {
   const styles = useThemedStyles(createStyles);
@@ -42,58 +40,41 @@ export default function RestorePrompt({ visible, onDismiss, onRestored }: Props)
     if (busy) return;
     setBusy(true);
     try {
-      const folder = await promptForBackupFolder();
-      if (!folder) {
-        // User cancelled the system folder picker — treat like skip.
-        markRestorePrompted();
-        onDismiss();
-        return;
-      }
-      const restored = await restoreBackupFromSafFolder(folder);
+      await restoreEverything();
       markRestorePrompted();
-      // Even when no data backup is found, the folder grant enables the audio
-      // and tafsir restore, so always refresh.
       onRestored();
-      if (restored) {
-        onDismiss();
-      } else {
-        Alert.alert(
-          "No backup found",
-          "That folder doesn't contain an Ayat Flow backup. If you're new to Ayat Flow, tap Skip."
-        );
-      }
+      onDismiss();
     } catch (error) {
       console.error("Restore failed:", error);
-      Alert.alert("Restore Failed", "Could not read the backup from that folder.");
+      Alert.alert("Restore Failed", "Could not restore your previous data.");
     } finally {
       setBusy(false);
     }
-  }, [busy, onDismiss, onRestored]);
+  }, [busy, onRestored, onDismiss]);
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleSkip}>
       <View style={styles.overlay}>
         <View style={styles.card}>
           <Text style={styles.emoji}>📖</Text>
-          <Text style={styles.title}>Restore your bookmarks?</Text>
+          <Text style={styles.title}>Restore everything?</Text>
           <Text style={styles.body}>
-            It looks like Ayat Flow was reinstalled. To bring back your bookmarks, downloaded
-            audio, and reading progress, pick the "AyatFlow" folder when the file picker opens.
-            It's at the top level of your internal storage — not inside Downloads.
+            We found your previous Ayat Flow data on this device. Restore your bookmarks,
+            reading progress, and downloaded audio?
           </Text>
           <Text style={styles.hint}>
-            If this is your first time using the app, tap Skip.
+            This happens automatically — no folder selection needed.
           </Text>
 
           <View style={styles.buttons}>
             <Pressable style={[styles.btn, styles.btnSecondary]} onPress={handleSkip} disabled={busy}>
-              <Text style={styles.btnSecondaryText}>Skip</Text>
+              <Text style={styles.btnSecondaryText}>Not now</Text>
             </Pressable>
             <Pressable style={[styles.btn, styles.btnPrimary]} onPress={handleRestore} disabled={busy}>
               {busy ? (
                 <ActivityIndicator size="small" color={c.onAccent} />
               ) : (
-                <Text style={styles.btnPrimaryText}>Choose Folder</Text>
+                <Text style={styles.btnPrimaryText}>Restore everything</Text>
               )}
             </Pressable>
           </View>

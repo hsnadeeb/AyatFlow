@@ -21,7 +21,10 @@ const MIN_VALID_FILE_SIZE = 1000;
 /** How many files to download at once for a whole-surah download. Uncapped concurrency
  *  (e.g. 572 requests for Al-Baqarah) saturates the radio and starves every request. */
 const MAX_CONCURRENT_DOWNLOADS = 4;
-const DOWNLOAD_TIMEOUT_MS = 60_000;
+/** Per-attempt timeout. The longest ayahs (Al-Baqarah 255 is a ~2.5MB MP3) can take
+ *  well over a minute on a slow mobile connection, so this is generous and grows
+ *  with each retry instead of failing everything on a slow-but-working network. */
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 800;
 const PERMISSION_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -268,7 +271,7 @@ class DownloadManager {
   private getAudioDirectory(): string {
     // Internal app storage holds the working copies used for playback. On Android,
     // completed downloads are ALSO mirrored to shared storage
-    // (/storage/emulated/0/AyatFlow/quran-audio/) so the whole AyatFlow
+    // (/storage/emulated/0/Download/AyatFlow/quran-audio/) so the whole AyatFlow
     // folder is portable: copy it to a new phone and the app restores from it.
     return `${FileSystem.documentDirectory}${AUDIO_DIRECTORY}/`;
   }
@@ -857,7 +860,7 @@ class DownloadManager {
 
   getStorageLocation(): string {
     if (Platform.OS === 'android') {
-      return `/storage/emulated/0/AyatFlow/quran-audio/`;
+      return `/storage/emulated/0/Download/AyatFlow/quran-audio/`;
     }
     return this.audioDir;
   }
@@ -989,7 +992,16 @@ class DownloadManager {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const uri = await this.attemptDownload(url, partPath, key, surahNumber, ayahNumber, type, onProgress);
+        const uri = await this.attemptDownload(
+          url,
+          partPath,
+          key,
+          surahNumber,
+          ayahNumber,
+          type,
+          onProgress,
+          attempt
+        );
 
         // Validate BEFORE promoting the file to its real name. This is what guarantees
         // that a file at `filePath` is always a complete, playable download — never a
@@ -1038,10 +1050,14 @@ class DownloadManager {
     surahNumber: number,
     ayahNumber: number,
     type: AudioType,
-    onProgress?: (progress: DownloadProgress) => void
+    onProgress?: (progress: DownloadProgress) => void,
+    attempt = 1
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       let settled = false;
+
+      // Slower connections get a proportionally longer leash on each retry.
+      const timeoutMs = DOWNLOAD_TIMEOUT_MS * attempt;
 
       const timeoutId = setTimeout(() => {
         if (settled) return;
@@ -1049,8 +1065,8 @@ class DownloadManager {
         const handle = this.activeDownloads.get(key);
         this.activeDownloads.delete(key);
         handle?.pauseAsync().catch(() => {});
-        reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`));
-      }, DOWNLOAD_TIMEOUT_MS);
+        reject(new Error(`Download timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
 
       const downloadResumable = FileSystem.createDownloadResumable(url, partPath, {}, (downloadProgress) => {
         if (settled) return;

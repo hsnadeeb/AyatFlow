@@ -31,7 +31,8 @@ import androidx.documentfile.provider.DocumentFile
  *
  * Shared storage layout:
  *
- * /storage/emulated/0/AyatFlow/
+ * Android 10+ (API 29+):
+ * /storage/emulated/0/Download/AyatFlow/
  * ├── ayah-flow-backup.json
  * ├── data/
  * │   ├── bookmarks.json
@@ -45,15 +46,17 @@ import androidx.documentfile.provider.DocumentFile
  * └── tafsir/
  *     └── {urdu,english}/N.json
  *
- * The whole AyatFlow folder is portable: copying it to a new phone and
- * installing the app there allows the app to restore the data.
- *
- * Android 10+ (API 29+):
- *   Uses MediaStore.Files with RELATIVE_PATH.
- *
  * Android 9- (API 28-):
- *   Uses the public external storage root through the File API.
- *   WRITE_EXTERNAL_STORAGE permission is required.
+ * /storage/emulated/0/AyatFlow/
+ *   Same layout, accessed through the public external storage root via the
+ *   File API (WRITE_EXTERNAL_STORAGE permission required).
+ *
+ * NOTE: MediaStore RELATIVE_PATHs on API 29+ MUST start with an allowed
+ * primary directory (Download, Documents, Music, ...). A bare "AyatFlow/"
+ * root is rejected with "Primary directory AyatFlow not allowed", so the
+ * folder lives under Download/ on modern Android. The AyatFlow folder stays
+ * portable either way: copying it to a new phone and installing the app
+ * there allows the app to restore the data.
  */
 class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -103,7 +106,13 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun openAyatFlowFolder(promise: Promise) {
         try {
-            val dir = File(sharedStorageRoot(), legacyRootDir)
+            // On API 29+ the portable folder lives under Download/ (MediaStore
+            // requirement); on API 28- it's at the shared-storage root.
+            val dir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                File(sharedStorageRoot(), mediaStoreRoot)
+            } else {
+                File(sharedStorageRoot(), legacyRootDir)
+            }
             dir.mkdirs()
 
             val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -127,7 +136,11 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun isAyatFlowFolderPresent(promise: Promise) {
         try {
-            val root = File(sharedStorageRoot(), legacyRootDir)
+            val root = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                File(sharedStorageRoot(), mediaStoreRoot)
+            } else {
+                File(sharedStorageRoot(), legacyRootDir)
+            }
             promise.resolve(root.exists())
         } catch (e: Exception) {
             promise.reject("FOLDER_CHECK_FAILED", e.message, e)
@@ -141,7 +154,11 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun ensureAyatFlowFolder(promise: Promise) {
         try {
-            val root = File(sharedStorageRoot(), legacyRootDir)
+            val root = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                File(sharedStorageRoot(), mediaStoreRoot)
+            } else {
+                File(sharedStorageRoot(), legacyRootDir)
+            }
             File(root, "data").mkdirs()
             File(root, "quran-audio").mkdirs()
             File(root, "tafsir").mkdirs()
@@ -158,18 +175,20 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
     private val fileName = "ayah-flow-backup.json"
 
     /**
-     * IMPORTANT:
-     * These paths are relative to the shared internal-storage root.
+     * MediaStore RELATIVE_PATH roots. The first segment MUST be an allowed
+     * primary directory (Download, Documents, Music, ...) — "AyatFlow/" alone
+     * is rejected by the system on Android 10+, which silently broke every
+     * backup/mirror write. Files land at:
      *
-     * Result:
-     * /storage/emulated/0/AyatFlow/
+     * /storage/emulated/0/Download/AyatFlow/
      */
-    private val backupRelativePath = "AyatFlow/"
-    // JS passes the "data" subfolder as relativeDir, so the data root is just
-    // "AyatFlow/" — concatenating it with relativeDir yields "AyatFlow/data/".
-    private val dataRelativeRoot = "AyatFlow/"
-    private val audioRelativeRoot = "AyatFlow/quran-audio/"
-    private val tafsirRelativeRoot = "AyatFlow/tafsir/"
+    private val mediaStoreRoot = "${Environment.DIRECTORY_DOWNLOADS}/AyatFlow/"
+    private val backupRelativePath = mediaStoreRoot
+    // JS passes the "data" subfolder as relativeDir, so the data root is the
+    // AyatFlow root — concatenating it with relativeDir yields "AyatFlow/data/".
+    private val dataRelativeRoot = mediaStoreRoot
+    private val audioRelativeRoot = "${mediaStoreRoot}quran-audio/"
+    private val tafsirRelativeRoot = "${mediaStoreRoot}tafsir/"
 
     /**
      * Used by the legacy File API on Android 9 and below.

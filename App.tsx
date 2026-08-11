@@ -40,7 +40,9 @@ import {
   scheduleBackupSave,
   saveBackup,
   syncBackup,
-  shouldOfferRestorePick,
+  shouldOfferAutoRestore,
+  isLocalDataEmpty,
+  detectSharedBackup,
 } from "./src/backup";
 import { ThemeProvider, useTheme } from "./src/theme";
 import { initializeWidget, setWidgetPlayingState } from "./src/widget/widgetManager";
@@ -157,11 +159,15 @@ function AppInner() {
         }
 
         // Move any old AsyncStorage-era user data into the AyatFlow folder, then
-        // sync with the shared folder (restore on fresh install / refresh otherwise).
+        // sync with the shared folder. On a fresh install where a previous backup
+        // exists, DON'T restore silently — the user is asked whether to restore
+        // everything (see shouldOfferAutoRestore below).
         // Must run before ensureInitialized so restored progress/prefs are read.
         await migrateStorageToFiles();
         await migrateLegacyBookmarks();
-        await syncBackup();
+        const freshInstall = await isLocalDataEmpty();
+        const backupExists = freshInstall && (await detectSharedBackup());
+        await syncBackup(!backupExists);
         await syncTafsirCacheFromShared();
 
         const [loadedSurahs, savedBookmarks, savedSurahBookmarks] = await Promise.all([
@@ -195,11 +201,10 @@ function AppInner() {
         setLoading(false);
       }
 
-      // After a reinstall Android 10+ hides the previous MediaStore backup
-      // from the reinstalled app, so offer the user the system folder picker
-      // once to re-grant access and restore their bookmarks.
+      // After a reinstall a previous backup may be waiting in shared storage;
+      // offer one automatic restore (no folder picker) when it is.
       try {
-        if (await shouldOfferRestorePick()) {
+        if (await shouldOfferAutoRestore()) {
           setRestorePromptVisible(true);
         }
       } catch {}

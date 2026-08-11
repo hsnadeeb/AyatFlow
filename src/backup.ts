@@ -1,6 +1,5 @@
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as FileSystem from "expo-file-system/legacy";
 import { sharedStorage, ensureSharedStoragePermission } from "./sharedStorage";
 import {
   getAyahBookmarks,
@@ -69,7 +68,6 @@ type BackupData = {
   audioPrefs: AudioPrefs;
 };
 
-const { StorageAccessFramework } = FileSystem;
 const module = sharedStorage;
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -108,10 +106,6 @@ async function collectBackupData(): Promise<BackupData> {
  */
 export async function getBackupFolderUri(): Promise<string | null> {
   return AsyncStorage.getItem(SAF_FOLDER_KEY);
-}
-
-export async function saveBackupFolderUri(uri: string): Promise<void> {
-  await AsyncStorage.setItem(SAF_FOLDER_KEY, uri);
 }
 
 function safWriteTextFile(folderUri: string, relativePath: string, content: string): Promise<boolean> {
@@ -426,39 +420,84 @@ async function restoreFromRaw(raw: string): Promise<boolean> {
  * "Reinstall sync": called once at startup.
  *
  * - If the app's local data is empty (fresh install or cleared data) and the
- *   shared folder has data files, restore them into app storage.
+ *   shared folder has data files, restore them into app storage — unless
+ *   `autoRestore` is false, in which case the caller decides (e.g. to ask the
+ *   user first instead of restoring silently).
  * - Otherwise refresh the shared copies with the current local data.
  *
  * Returns true when a restore happened.
- *
- * Note: on Android 10+ a MediaStore file written by a previous install can
- * become unreadable after uninstall/reinstall (the file is unbound from the
- * app). If the user has granted access to the backup folder via the system
- * folder picker (Storage Access Framework), that copy is tried as a fallback.
  */
-export async function syncBackup(): Promise<boolean> {
+export async function syncBackup(autoRestore = true): Promise<boolean> {
+  if (await isLocalDataEmpty()) {
+    if (!autoRestore) return false;
+    if (await restoreDataFromShared()) return true;
+
+    // Fall back to the legacy combined backup blob.
+    if (module && (await ensureSharedStoragePermission())) {
+      try {
+        const raw = await module.loadBackup();
+        if (raw && (await restoreFromRaw(raw))) return true;
+      } catch (error) {
+        console.warn("Failed to read backup via MediaStore:", error);
+      }
+    }
+    return false;
+  }
+
+  // Existing install: keep local data, just refresh the shared copies.
+  scheduleBackupSave();
+  return false;
+}
+
+/** True when the app has no local user data (fresh install or cleared data). */
+export async function isLocalDataEmpty(): Promise<boolean> {
   const [ayahBookmarks, surahBookmarks, last, progress] = await Promise.all([
     getAyahBookmarks(),
     getSurahBookmarks(),
     getLastPosition(),
     getSurahProgress(),
   ]);
-
-  const isEmpty =
+  return (
     ayahBookmarks.length === 0 &&
     surahBookmarks.length === 0 &&
     !last &&
-    Object.keys(progress).length === 0;
+    Object.keys(progress).length === 0
+  );
+}
 
-  if (!isEmpty) {
-    // Existing install: keep local data, just refresh the shared copies.
-    scheduleBackupSave();
-    return false;
+/**
+ * True when a backup from a previous install exists in shared storage that a
+ * fresh install could restore — checked automatically, with no folder picker.
+ * MediaStore keeps ownership by package name, so files written by the previous
+ * install are readable again after a reinstall.
+ */
+export async function detectSharedBackup(): Promise<boolean> {
+  if (!module) return false;
+  if (!(await ensureSharedStoragePermission())) return false;
+  try {
+    const bookmarks = await module.readDataFile(DATA_SUBDIR, "bookmarks.json");
+    if (bookmarks) return true;
+  } catch (error) {
+    console.warn("Failed to check bookmarks via MediaStore:", error);
   }
+  try {
+    const raw = await module.loadBackup();
+    if (raw) return true;
+  } catch (error) {
+    console.warn("Failed to check backup via MediaStore:", error);
+  }
+  return false;
+}
 
+/**
+ * Restore everything found in shared storage into app storage: the individual
+ * data files (bookmarks, progress, prefs) and the legacy combined backup blob.
+ * Fully automatic — no folder selection involved. Audio and tafsir restore
+ * separately via their own shared-storage syncs.
+ */
+export async function restoreEverything(): Promise<boolean> {
   if (await restoreDataFromShared()) return true;
 
-  // Fall back to the legacy combined backup blob.
   if (module && (await ensureSharedStoragePermission())) {
     try {
       const raw = await module.loadBackup();
@@ -467,70 +506,20 @@ export async function syncBackup(): Promise<boolean> {
       console.warn("Failed to read backup via MediaStore:", error);
     }
   }
-
-  const folder = await getBackupFolderUri();
-  if (folder) {
-    const raw = await safReadTextFile(folder, BACKUP_FILE_NAME);
-    if (raw && (await restoreFromRaw(raw))) return true;
-  }
-
   return false;
 }
 
 /**
- * Restore from a folder the user picked in the system folder picker.
- * Persists the folder so future backups are written there (and are readable
- * after the next reinstall).
+ * Whether the app should offer the user a one-time automatic restore. Only
+ * true on a fresh install (empty local data) that hasn't been asked before
+ * and that has a previous backup waiting in shared storage.
  */
-export async function restoreBackupFromSafFolder(folderUri: string): Promise<boolean> {
-  await saveBackupFolderUri(folderUri);
-  const restored = await restoreDataFromShared();
-  if (restored) return true;
-
-  const raw = await safReadTextFile(folderUri, BACKUP_FILE_NAME);
-  if (!raw) return false;
-  return restoreFromRaw(raw);
-}
-
-/**
- * Show the system folder picker, pre-navigated to AyatFlow, and grant
- * the app persistent read/write access to the chosen folder.
- */
-export async function promptForBackupFolder(): Promise<string | null> {
-  try {
-    const initialUri = StorageAccessFramework.getUriForDirectoryInRoot("AyatFlow");
-    const result = await StorageAccessFramework.requestDirectoryPermissionsAsync(initialUri);
-    if (result.granted && result.directoryUri) {
-      await saveBackupFolderUri(result.directoryUri);
-      return result.directoryUri;
-    }
-  } catch (error) {
-    console.warn("Failed to request backup folder:", error);
-  }
-  return null;
-}
-
-/**
- * Whether the app should offer the user a one-time restore prompt. Only true
- * on a fresh install (empty local data) with no backup folder granted yet and
- * no backup found anywhere.
- */
-export async function shouldOfferRestorePick(): Promise<boolean> {
+export async function shouldOfferAutoRestore(): Promise<boolean> {
   if (Platform.OS !== "android") return false;
-  const [ayahBookmarks, surahBookmarks, last, progress, folder, prompted] = await Promise.all([
-    getAyahBookmarks(),
-    getSurahBookmarks(),
-    getLastPosition(),
-    getSurahProgress(),
-    getBackupFolderUri(),
-    AsyncStorage.getItem(RESTORE_PROMPTED_KEY),
-  ]);
-  if (ayahBookmarks.length > 0 || surahBookmarks.length > 0) return false;
-  if (last) return false;
-  if (Object.keys(progress).length > 0) return false;
-  if (folder) return false;
+  if (!(await isLocalDataEmpty())) return false;
+  const prompted = await AsyncStorage.getItem(RESTORE_PROMPTED_KEY);
   if (prompted === "true") return false;
-  return true;
+  return detectSharedBackup();
 }
 
 export async function markRestorePrompted(): Promise<void> {

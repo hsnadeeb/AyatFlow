@@ -227,16 +227,21 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
           refreshStorage();
 
           if (!result.cancelled && result.failed > 0) {
+            const sample = result.failedItems[0]?.error;
             Alert.alert(
               "Some files didn't download",
-              `${result.failed} of ${result.succeeded + result.failed} files failed. Tap "Resume Download" to retry the missing ones.`
+              `${result.failed} of ${result.succeeded + result.failed} files failed. Tap "Resume Download" to retry the missing ones.${
+                sample ? `\n\nFirst error: ${sample}` : ""
+              }`
             );
           }
         }
       } catch (error) {
         console.error("Download failed:", error);
         if (isMountedRef.current) {
-          Alert.alert("Download Failed", "Something went wrong while downloading audio.");
+          const message =
+            error instanceof Error && error.message ? error.message : "Something went wrong while downloading audio.";
+          Alert.alert("Download Failed", message);
         }
       }
     },
