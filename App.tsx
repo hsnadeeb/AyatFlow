@@ -141,6 +141,12 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
+        try {
+          await ensureSharedStoragePermission();
+        } catch (error) {
+          console.warn("Failed to ensure shared storage permission:", error);
+        }
+
         // Ensure the AyatFlow folder exists in shared storage before any sync operations
         if (sharedStorage?.ensureAyatFlowFolder) {
           try {
@@ -148,12 +154,6 @@ function AppInner() {
           } catch (error) {
             console.warn("Failed to ensure AyatFlow folder:", error);
           }
-        }
-
-        try {
-          await ensureSharedStoragePermission();
-        } catch (error) {
-          console.warn("Failed to ensure shared storage permission:", error);
         }
 
         // Move any old AsyncStorage-era user data into the AyatFlow folder, then

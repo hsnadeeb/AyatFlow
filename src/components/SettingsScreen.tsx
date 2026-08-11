@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   Alert,
   Image,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -110,14 +111,13 @@ export default function SettingsScreen({ audioPrefs, surahs, onToggleAudio, onOp
   const onOpenAyatFlowFolder = useCallback(async () => {
     try {
       const hasPermission = await ensureSharedStoragePermission();
-      if (!hasPermission) {
-        Alert.alert("Ayat Flow", "Please grant storage access so the AyatFlow folder can be opened.");
-        return;
+      if (!hasPermission && Platform.OS === "android") {
+        Alert.alert("Ayat Flow", "Storage access is limited on this Android version, so the folder will open only if the device exposes it.");
       }
 
       const opened = await openAyatFlowFolder();
       if (!opened) {
-        Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened from this device. You can still find it in shared storage.");
+        Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened automatically. You can still browse it from the device’s Files app if it is visible.");
       }
     } catch {
       Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened right now.");
