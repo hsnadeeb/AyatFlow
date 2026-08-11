@@ -23,6 +23,7 @@ import java.io.IOException
 import java.net.URI
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import androidx.documentfile.provider.DocumentFile
 
 /**
  * Persists app data and mirrors audio downloads to shared storage so they
