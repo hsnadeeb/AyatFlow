@@ -29,11 +29,13 @@ import {
 import HomeScreen from "./src/components/HomeScreen";
 import FlowScreen from "./src/components/FlowScreen";
 import DownloadManager from "./src/components/DownloadManagerModal";
+import DownloadAllModal from "./src/components/DownloadAllModal";
 import SettingsScreen from "./src/components/SettingsScreen";
 import BookmarksScreen from "./src/components/BookmarksScreen";
 import RestorePrompt from "./src/components/RestorePrompt";
 import ShareModal from "./src/components/ShareModal";
 import { getDownloadManager, cleanupDownloadManager } from "./src/downloadManager";
+import { downloadAllManager } from "./src/downloadAllManager";
 import {
   scheduleBackupSave,
   saveBackup,
@@ -74,6 +76,8 @@ function AppInner() {
   const [surahBookmarks, setSurahBookmarks] = useState<number[]>([]);
   const [downloadManagerVisible, setDownloadManagerVisible] = useState(false);
   const [downloadManagerSurah, setDownloadManagerSurah] = useState<Surah | null>(null);
+  const [downloadAllVisible, setDownloadAllVisible] = useState(false);
+  const [downloadAllRunning, setDownloadAllRunning] = useState(false);
   const [restorePromptVisible, setRestorePromptVisible] = useState(false);
   const [downloadingSurahs, setDownloadingSurahs] = useState<Set<number>>(new Set());
   const [downloadedSurahs, setDownloadedSurahs] = useState<Set<number>>(new Set());
@@ -209,10 +213,19 @@ function AppInner() {
   const refreshDownloadedSurahs = useCallback(() => {
     const current = surahsRef.current;
     if (current.length === 0) return;
+    // Status keys are stored under GLOBAL ayah numbers (surah 2's first ayah
+    // is #8, not #1), so compute each surah's starting global number by
+    // walking the ordered list cumulatively.
     const counts: Record<number, number> = {};
-    for (const s of current) counts[s.number] = s.numberOfAyahs;
+    const starts: Record<number, number> = {};
+    let global = 1;
+    for (const s of [...current].sort((a, b) => a.number - b.number)) {
+      starts[s.number] = global;
+      counts[s.number] = s.numberOfAyahs;
+      global += s.numberOfAyahs;
+    }
     setDownloadedSurahs((prev) => {
-      const next = getDownloadManager().getDownloadedSurahs(counts);
+      const next = getDownloadManager().getDownloadedSurahs(counts, starts);
       if (prev.size === next.size && [...prev].every((n) => next.has(n))) return prev;
       return next;
     });
@@ -295,7 +308,11 @@ function AppInner() {
     if (downloadManager.isSurahDownloading(surahNumber)) return;
 
     // Check if surah is already downloaded
-    const progress = await downloadManager.getSurahDownloadProgress(surahNumber, ayahs.length);
+    const progress = await downloadManager.getSurahDownloadProgress(
+      surahNumber,
+      ayahs.length,
+      ayahs[0]?.number
+    );
     if (progress >= 1) {
       return; // Already fully downloaded
     }
@@ -372,6 +389,10 @@ function AppInner() {
   const onOpenSettings = useCallback(() => {
     playbackController.stopAll();
     setScreen("settings");
+  }, []);
+
+  const openDownloadAll = useCallback(() => {
+    setDownloadAllVisible(true);
   }, []);
 
   const onOpenBookmarks = useCallback(() => {
@@ -551,7 +572,9 @@ function AppInner() {
         <StatusBar style={isDark ? "light" : "dark"} />
         <SettingsScreen
           audioPrefs={audioPrefs}
+          surahs={surahs}
           onToggleAudio={onToggleAudio}
+          onOpenDownloadAll={openDownloadAll}
           onClose={onCloseSubScreen}
         />
       </SafeAreaView>
@@ -622,6 +645,11 @@ function AppInner() {
         surahs={surahs}
         downloadedSurahs={downloadedSurahs}
         onClose={() => setShareVisible(false)}
+      />
+      <DownloadAllModal
+        visible={downloadAllVisible}
+        surahs={surahs}
+        onClose={() => setDownloadAllVisible(false)}
       />
       <RestorePrompt
         visible={restorePromptVisible}

@@ -8,13 +8,18 @@ import {
   Image
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Surah } from "../api";
 import { AudioPrefs } from "../storage";
 import { radii, serif, ThemeMode, useTheme, useThemedStyles } from "../theme";
 import { getDownloadManager } from "../downloadManager";
 
+
+
 type Props = {
   audioPrefs: AudioPrefs;
+  surahs: Surah[];
   onToggleAudio: (stage: "arabic" | "english" | "tafsir") => void;
+  onOpenDownloadAll: () => void;
   onClose: () => void;
 };
 
@@ -65,7 +70,7 @@ function Toggle({
   );
 }
 
-export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: Props) {
+export default function SettingsScreen({ audioPrefs, surahs, onToggleAudio, onOpenDownloadAll, onClose }: Props) {
   const insets = useSafeAreaInsets();
   const styles = useThemedStyles(createStyles);
   const { palette: c, isDark, mode, setMode } = useTheme();
@@ -163,6 +168,16 @@ export default function SettingsScreen({ audioPrefs, onToggleAudio, onClose }: P
 
         <Text style={styles.sectionLabel}>STORAGE</Text>
         <View style={styles.card}>
+          <Row
+            label="Download everything"
+            sub="Recitation, meaning audio, and tafsir for every surah"
+            right={
+              <Pressable style={styles.actionBtn} onPress={onOpenDownloadAll} accessibilityRole="button">
+                <Text style={styles.actionBtnText}>{surahs.length > 0 ? "Download" : "Preparing…"}</Text>
+              </Pressable>
+            }
+          />
+          <View style={styles.cardDivider} />
           <Row
             label="Downloaded audio"
             sub={
@@ -348,6 +363,17 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     toggleKnobOn: {
       alignSelf: "flex-end",
       backgroundColor: c.accent,
+    },
+    actionBtn: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: radii.control,
+      backgroundColor: c.accent,
+    },
+    actionBtnText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: c.onAccent,
     },
     storageValue: {
       fontSize: 14,

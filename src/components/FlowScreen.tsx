@@ -24,6 +24,7 @@ import {
   getTafsirLanguagePreference,
   saveTafsirLanguagePreference,
 } from "../storage";
+import { ttsVoiceAvailable } from "../playback/ttsVoicePicker";
 
 type Props = {
   surah: Surah;
@@ -139,6 +140,25 @@ const FlowScreen = React.memo(function FlowScreen({
   const [tafsirLoading, setTafsirLoading] = useState(false);
   const [tafsirError, setTafsirError] = useState(false);
   const tafsirAnim = useRef(new Animated.Value(0)).current;
+
+  // Which languages have a worthwhile voice installed? Used to hint the user
+  // when the selected commentary's voice is missing (read-aloud is then done
+  // by whatever the engine falls back to — usually poor audio).
+  const [missingVoices, setMissingVoices] = useState<{ urdu: boolean; english: boolean }>({
+    urdu: false,
+    english: false,
+  });
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const [en, ur] = await Promise.all([ttsVoiceAvailable("en"), ttsVoiceAvailable("ur")]);
+      if (mounted) setMissingVoices({ english: !en, urdu: !ur });
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Remember the chosen commentary language (Urdu/English) across sessions.
   useEffect(() => {
@@ -440,6 +460,16 @@ const FlowScreen = React.memo(function FlowScreen({
                     </Pressable>
                   ))}
                 </View>
+
+                {missingVoices[tafsirLanguage] && (
+                  <View style={styles.tafsirVoiceHintBox}>
+                    <Text style={styles.tafsirVoiceHint}>
+                      {tafsirLanguage === "urdu"
+                        ? "No Urdu voice found on this device. Install an Urdu voice (e.g. Google Text-to-Speech) in Android Settings → Language & input → Text-to-speech for clear read-aloud."
+                        : "No good English voice found on this device. Install Google Text-to-Speech in Android Settings → Language & input → Text-to-speech for clear read-aloud."}
+                    </Text>
+                  </View>
+                )}
 
                 {tafsirLoading ? (
                   <View style={styles.tafsirStateBox}>
@@ -905,6 +935,19 @@ function createStyles(t: ReturnType<typeof useTheme>) {
     },
     tafsirTabTextActive: {
       color: c.bg,
+    },
+    tafsirVoiceHintBox: {
+      marginTop: 10,
+      marginBottom: 14,
+      backgroundColor: c.well,
+      borderRadius: radii.control - 4,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    tafsirVoiceHint: {
+      fontSize: 11.5,
+      lineHeight: 17,
+      color: c.muted,
     },
     tafsirText: {
       fontSize: 15,

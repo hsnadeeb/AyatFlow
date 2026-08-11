@@ -718,13 +718,22 @@ class DownloadManager {
     return status.progress ?? 0;
   }
 
-  /** Parallelized (not one-stat-call-per-ayah-in-sequence) — matters once a surah has
-   *  hundreds of ayahs. */
-  async getSurahDownloadProgress(surahNumber: number, totalAyats: number): Promise<number> {
+  /**
+   * Parallelized (not one-stat-call-per-ayah-in-sequence) — matters once a surah has
+   * hundreds of ayahs. `ayahStart` is the global Quran-wide number of the surah's
+   * first ayah (e.g. 8 for surah 2) — files and status keys are stored under those
+   * global numbers, not the per-surah numbering.
+   */
+  async getSurahDownloadProgress(
+    surahNumber: number,
+    totalAyats: number,
+    ayahStart?: number
+  ): Promise<number> {
     await this.whenReady();
     if (totalAyats <= 0) return 0;
 
-    const ayahNumbers = Array.from({ length: totalAyats }, (_, i) => i + 1);
+    const start = ayahStart ?? 1;
+    const ayahNumbers = Array.from({ length: totalAyats }, (_, i) => start + i);
     const results = await runWithConcurrencyLimit(ayahNumbers, 8, async (ayahNumber) => {
       const [arabic, english] = await Promise.all([
         this.isDownloaded(surahNumber, ayahNumber, 'arabic'),
@@ -740,17 +749,24 @@ class DownloadManager {
    * Fast, in-memory per-surah download info backed by the status cache (no disk
    * stats) — used for the "downloaded" checkmark on surah lists and for the share
    * picker. The cache is kept in sync by loadStatus / completion / delete events.
+   * `ayahStart` is the global Quran-wide number of the surah's first ayah — status
+   * keys are stored under global ayah numbers, not the per-surah numbering.
    */
   getSurahDownloadInfo(
     surahNumber: number,
-    totalAyats: number
+    totalAyats: number,
+    ayahStart?: number
   ): { downloadedAyahs: number; full: boolean; arabicCount: number; englishCount: number } {
     let downloadedAyahs = 0;
     let arabicCount = 0;
     let englishCount = 0;
-    for (let a = 1; a <= totalAyats; a++) {
-      const arabic = this.statusCache[this.getAudioKey(surahNumber, a, 'arabic')]?.downloaded ?? false;
-      const english = this.statusCache[this.getAudioKey(surahNumber, a, 'english')]?.downloaded ?? false;
+    const start = ayahStart ?? 1;
+    for (let i = 0; i < totalAyats; i++) {
+      const globalNumber = start + i;
+      const arabic =
+        this.statusCache[this.getAudioKey(surahNumber, globalNumber, 'arabic')]?.downloaded ?? false;
+      const english =
+        this.statusCache[this.getAudioKey(surahNumber, globalNumber, 'english')]?.downloaded ?? false;
       if (arabic) arabicCount++;
       if (english) englishCount++;
       if (arabic && english) downloadedAyahs++;
@@ -777,10 +793,12 @@ class DownloadManager {
    * Cheap, cache-backed per-surah download progress (no disk stats). Merges
    * confirmed downloads with live in-flight progress, so the UI can refresh
    * itself on every progress event without scanning the filesystem.
+   * `ayahStart` is the global Quran-wide number of the surah's first ayah.
    */
   getSurahLiveStatus(
     surahNumber: number,
-    totalAyats: number
+    totalAyats: number,
+    ayahStart?: number
   ): {
     arabicProgress: number;
     englishProgress: number;
@@ -795,9 +813,11 @@ class DownloadManager {
     let englishDone = 0;
     let bothDone = 0;
 
-    for (let a = 1; a <= totalAyats; a++) {
-      const arabic = this.statusCache[this.getAudioKey(surahNumber, a, 'arabic')];
-      const english = this.statusCache[this.getAudioKey(surahNumber, a, 'english')];
+    const start = ayahStart ?? 1;
+    for (let i = 0; i < totalAyats; i++) {
+      const globalNumber = start + i;
+      const arabic = this.statusCache[this.getAudioKey(surahNumber, globalNumber, 'arabic')];
+      const english = this.statusCache[this.getAudioKey(surahNumber, globalNumber, 'english')];
       const ap = arabic ? (arabic.downloaded ? 1 : arabic.progress ?? 0) : 0;
       const ep = english ? (english.downloaded ? 1 : english.progress ?? 0) : 0;
       arabicTotal += ap;
@@ -817,13 +837,18 @@ class DownloadManager {
     };
   }
 
-  /** Set of surah numbers that are fully downloaded (both languages, every ayah). */
-  getDownloadedSurahs(totalAyatsBySurah: Record<number, number>): Set<number> {
+  /** Set of surah numbers that are fully downloaded (both languages, every ayah).
+   *  `startBySurah` maps each surah to the global Quran-wide number of its first
+   *  ayah (computed by the caller from the ordered surah list). */
+  getDownloadedSurahs(
+    totalAyatsBySurah: Record<number, number>,
+    startBySurah?: Record<number, number>
+  ): Set<number> {
     const result = new Set<number>();
     for (const [surahStr, total] of Object.entries(totalAyatsBySurah)) {
       const surahNumber = Number(surahStr);
       if (!Number.isInteger(surahNumber) || total <= 0) continue;
-      if (this.getSurahDownloadInfo(surahNumber, total).full) {
+      if (this.getSurahDownloadInfo(surahNumber, total, startBySurah?.[surahNumber]).full) {
         result.add(surahNumber);
       }
     }

@@ -122,7 +122,7 @@ export default function DownloadManagerModal({ visible, surah, ayahs, onClose }:
     const now = Date.now();
     if (now - lastLiveRefreshAtRef.current < 500) return;
     lastLiveRefreshAtRef.current = now;
-    const status = downloadManager.getSurahLiveStatus(surah.number, ayahs.length);
+    const status = downloadManager.getSurahLiveStatus(surah.number, ayahs.length, ayahs[0]?.number);
     if (isMountedRef.current) {
       setArabicProgress(status.arabicProgress);
       setEnglishProgress(status.englishProgress);

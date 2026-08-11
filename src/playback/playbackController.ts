@@ -1,7 +1,8 @@
-import { createAudioPlayer, setAudioModeAsync, AudioPlayer } from "expo-audio";
+import { createAudioPlayer, setAudioModeAsync, AudioPlayer, AudioStatus } from "expo-audio";
 import * as Speech from "expo-speech";
 import * as FileSystem from "expo-file-system/legacy";
 import { getSurah, Ayah, Surah } from "../api";
+import { pickBestTtsVoice } from "./ttsVoicePicker";
 import { TafsirLanguage } from "../tafsirService";
 import {
   getAudioPrefs,
@@ -62,14 +63,11 @@ function chunkText(text: string, maxChars: number): string[] {
   return chunks;
 }
 
-async function waitForCondition(condition: () => boolean, timeoutMs: number) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (condition()) return true;
-    await sleep(100);
-  }
-  return condition();
-}
+/** Load timeout for a single audio source. Dead sources bail much sooner via
+ *  the error listener; this is only a worst-case cap. */
+const LOAD_TIMEOUT_MS = 8000;
+/** How long a reachability HEAD check may take before giving up. */
+const PREFLIGHT_TIMEOUT_MS = 4000;
 
 /**
  * Singleton playback engine shared by the app UI and the headless widget task.
@@ -118,8 +116,33 @@ class PlaybackController {
   private currentTafsirText: string | null = null;
   private currentTafsirLanguage: TafsirLanguage = "urdu";
 
+  /**
+   * Why these exist: when a remote audio URL is dead (network down, CDN
+   * unreachable), the native player (ExoPlayer) retries the load three times
+   * with backoff before erroring, and the old code then polled for a full
+   * 10s — per ayah, every ayah. The sets below remember failures for the
+   * current surah so the flow skips straight to its fallback (TTS for
+   * English, English stage for Arabic) instead of stalling again.
+   */
+  /** Exact sources (file paths or URLs) that failed to load this session. */
+  private failedSources = new Set<string>();
+  /** "stage:surah" keys (e.g. "english:2") whose remote audio is dead. */
+  private failedSurahStage = new Set<string>();
+  /** Latest native player load error, surfaced through playbackStatusUpdate. */
+  private lastPlayerError: string | null = null;
+
   constructor() {
     this.player.addListener("playbackStatusUpdate", (status) => {
+      // The native side includes `error` in the status payload only when a
+      // load fails (it's absent from the public AudioStatus type). Capture it
+      // so the load-wait loop can bail out the moment the player gives up,
+      // instead of polling until a fixed timeout.
+      const error = (status as AudioStatus & { error?: string | null }).error;
+      if (typeof error === "string" && error) {
+        this.lastPlayerError = error;
+      } else if (status.isLoaded || status.playing) {
+        this.lastPlayerError = null;
+      }
       const justFinished = status.didJustFinish;
       if (justFinished && !this.lastDidJustFinish) {
         this.lastDidJustFinish = true;
@@ -155,6 +178,57 @@ class PlaybackController {
   private emit() {
     for (const listener of this.listeners) {
       listener(this.state);
+    }
+  }
+
+  /** True when this stage's remote audio is known-dead for this surah. */
+  private stageMarkedFailed(stage: "arabic" | "english", surahNumber: number): boolean {
+    return this.failedSurahStage.has(`${stage}:${surahNumber}`);
+  }
+
+  private markStageFailed(stage: "arabic" | "english", surahNumber: number, source: string) {
+    this.failedSources.add(source);
+    this.failedSurahStage.add(`${stage}:${surahNumber}`);
+  }
+
+  /**
+   * Polls until the player has a real source loaded, the native player
+   * reports a load error, or the timeout elapses. Returns true only when the
+   * source actually loaded — everything else (session bumped, error, timeout)
+   * returns false so the caller can run its fallback.
+   */
+  private async waitForPlayerLoad(timeoutMs: number, session: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (session !== this.sessionRef) return false;
+      if (this.lastPlayerError) return false;
+      if (this.player.isLoaded || this.player.playing) return true;
+      await sleep(150);
+    }
+    if (session !== this.sessionRef) return false;
+    return !this.lastPlayerError && (this.player.isLoaded || this.player.playing);
+  }
+
+  /**
+   * Cheap HEAD check for remote URLs. The native player retries a dead load
+   * three times with backoff (~7s) before erroring, so probing first turns
+   * that multi-second stall per ayah into a fast skip to the fallback.
+   * Local file paths are never probed — they're already stat-checked.
+   */
+  private async isSourceReachable(url: string): Promise<boolean> {
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return true;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PREFLIGHT_TIMEOUT_MS);
+      try {
+        const response = await fetch(url, { method: "HEAD", signal: controller.signal });
+        return response.ok;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      console.warn("[Audio] Pre-flight check failed:", error);
+      return false;
     }
   }
 
@@ -194,6 +268,11 @@ class PlaybackController {
     this.advancingRef = false;
     this.sessionRef++;
     this.currentTafsirText = null;
+    // Fresh surah, fresh chance — the previous surah's dead sources may
+    // have come back (or the user switched networks).
+    this.failedSources.clear();
+    this.failedSurahStage.clear();
+    this.lastPlayerError = null;
     this.clearStageState();
     this.clearReadingTimer();
     this.player.pause();
@@ -411,7 +490,30 @@ class PlaybackController {
 
     const audioSource = localAudioPath || ayah.audio;
 
+    // Dead source already (this ayah's URL failed, or any ayah's remote
+    // audio failed this surah)? Skip straight to English — no retries, no
+    // multi-second stall, no repeated alert. Local files are always tried.
+    if (
+      this.failedSources.has(audioSource) ||
+      (!localAudioPath && this.stageMarkedFailed("arabic", data.surah.number))
+    ) {
+      console.log("[Arabic Audio] Source previously failed, skipping to English");
+      this.startEnglish();
+      return;
+    }
+
+    // Probe dead-slow remote loads once so ExoPlayer's internal triple-retry
+    // never makes every ayah wait several seconds.
+    if (localAudioPath === null && !(await this.isSourceReachable(audioSource))) {
+      console.log("[Arabic Audio] Source unreachable, skipping to English");
+      this.markStageFailed("arabic", data.surah.number, audioSource);
+      this.startEnglish();
+      return;
+    }
+    if (session !== this.sessionRef) return;
+
     try {
+      this.lastPlayerError = null;
       this.player.replace(audioSource);
       this.player.setPlaybackRate(this.state.speed);
       this.setLockScreenActive(true);
@@ -420,12 +522,15 @@ class PlaybackController {
       // Wait until the player has actually loaded the Arabic source before
       // marking the stage as started. Without this, the stale didJustFinish
       // flag from the previous English segment could skip the Arabic.
-      const loaded = await waitForCondition(
-        () => this.player.isLoaded || this.player.playing,
-        10000
-      );
+      const loaded = await this.waitForPlayerLoad(LOAD_TIMEOUT_MS, session);
       if (session !== this.sessionRef) return;
-      if (!loaded) throw new Error("Arabic audio did not load");
+      if (!loaded) {
+        if (this.lastPlayerError) {
+          this.markStageFailed("arabic", data.surah.number, audioSource);
+          console.warn("[Arabic Audio] Load failed:", this.lastPlayerError);
+        }
+        throw new Error("Arabic audio did not load");
+      }
 
       this.arabicStartedRef = true;
       this.startPositionMonitoring();
@@ -463,9 +568,10 @@ class PlaybackController {
 
     // Check for local audio file first
     const downloadManager = getDownloadManager();
+    let localAudioPath: string | null = null;
     let audioSource: string | null = null;
     try {
-      const localAudioPath = await downloadManager.getLocalAudioPath(
+      localAudioPath = await downloadManager.getLocalAudioPath(
         this.state.flow?.surah.number || 0,
         ayah.number,
         "english"
@@ -496,19 +602,46 @@ class PlaybackController {
     }
     if (session !== this.sessionRef) return;
 
+    // Known-dead source (this URL, or any remote English audio for this
+    // surah)? Read the meaning aloud instead of stalling on retries.
+    // Local files are always tried.
+    if (
+      audioSource &&
+      (this.failedSources.has(audioSource) ||
+        (!localAudioPath && this.stageMarkedFailed("english", this.state.flow!.surah.number)))
+    ) {
+      console.log("[English Audio] Source previously failed, using TTS");
+      this.fallbackToTextToSpeech(ayah, session);
+      return;
+    }
+
+    // Probe remote URLs before the player tries them, so a dead CDN skips to
+    // TTS in a second instead of ExoPlayer's triple-retry + timeout.
+    if (audioSource && !localAudioPath && !(await this.isSourceReachable(audioSource))) {
+      console.log("[English Audio] Source unreachable, using TTS");
+      this.markStageFailed("english", this.state.flow!.surah.number, audioSource);
+      this.fallbackToTextToSpeech(ayah, session);
+      return;
+    }
+    if (session !== this.sessionRef) return;
+
     if (audioSource) {
       try {
+        this.lastPlayerError = null;
         this.player.replace(audioSource);
         this.player.setPlaybackRate(this.state.speed);
         this.setLockScreenActive(true);
         this.player.play();
 
-        const loaded = await waitForCondition(
-          () => this.player.isLoaded || this.player.playing,
-          10000
-        );
+        const loaded = await this.waitForPlayerLoad(LOAD_TIMEOUT_MS, session);
         if (session !== this.sessionRef) return;
-        if (!loaded) throw new Error("English audio did not load");
+        if (!loaded) {
+          if (this.lastPlayerError) {
+            this.markStageFailed("english", this.state.flow!.surah.number, audioSource);
+            console.warn("[English Audio] Load failed:", this.lastPlayerError);
+          }
+          throw new Error("English audio did not load");
+        }
 
         this.englishStartedRef = true;
         this.startPositionMonitoring();
@@ -517,12 +650,12 @@ class PlaybackController {
         if (session !== this.sessionRef) return;
         // Fall back to text-to-speech if audio fails
         console.log("[English Audio] Falling back to TTS");
-        this.fallbackToTextToSpeech(ayah);
+        this.fallbackToTextToSpeech(ayah, session);
       }
     } else {
       // Fall back to text-to-speech if no audio file
       console.log("[English Audio] No audio source, using TTS");
-      this.fallbackToTextToSpeech(ayah);
+      this.fallbackToTextToSpeech(ayah, session);
     }
   }
 
@@ -583,16 +716,33 @@ class PlaybackController {
   /**
    * Reads the tafsir aloud. Android's TextToSpeech truncates any single
    * utterance past ~4000 chars, so long commentaries are split into chunks and
-   * read one after another. A watchdog estimates how long speech should take so
-   * the flow always advances even if the engine never fires its callbacks
-   * (missing voice, engine bug, silent failure).
+   * read one after another — pinned to the best installed voice for the
+   * language (see ttsVoicePicker) so the audio is clear, not the robotic
+   * engine default. A watchdog scaled to the effective speech rate estimates
+   * how long reading should take so the flow always advances even if the
+   * engine never fires its callbacks (missing voice, engine bug, silent
+   * failure) — without ever cutting a sentence short.
    */
-  private speakTafsirText(text: string, session: number) {
-    const language = this.currentTafsirLanguage === "urdu" ? "ur-PK" : "en-US";
+  private async speakTafsirText(text: string, session: number) {
+    const isUrdu = this.currentTafsirLanguage === "urdu";
+    const language = isUrdu ? "ur-PK" : "en-US";
+    const voice = await pickBestTtsVoice(isUrdu ? "ur" : "en");
+    if (session !== this.sessionRef) return;
+
+    // Natural voices read a touch slower; clamp per language so both stay
+    // intelligible at every playback speed.
+    const rate = isUrdu
+      ? Math.max(0.45, Math.min(1.0, 0.52 * this.state.speed))
+      : Math.max(0.5, Math.min(1.0, 0.58 * this.state.speed));
+
     const chunks = chunkText(text, 3600);
     let chunkIndex = 0;
 
-    console.log(`[Tafsir TTS] Starting speech for ${chunks.length} chunks in language ${language}`);
+    console.log(
+      `[Tafsir TTS] Starting speech for ${chunks.length} chunks in language ${language}, voice ${
+        voice ?? "system default"
+      }`
+    );
 
     const finish = () => {
       this.clearReadingTimer();
@@ -610,19 +760,21 @@ class PlaybackController {
       const chunk = chunks[chunkIndex++];
       console.log(`[Tafsir TTS] Speaking chunk ${chunkIndex}/${chunks.length}, length: ${chunk.length}`);
 
-      // Rough speech-time estimate (~110ms per char at 1×, slower in Urdu) plus
-      // a generous floor for engine startup. advance() is idempotent, so a late
-      // onDone can never double-advance.
+      // Rough speech-time estimate (~110ms per char at normal rate, more for
+      // Urdu and more again at slower speeds) plus a generous floor for engine
+      // startup. advance() is idempotent, so a late onDone can never
+      // double-advance.
       this.clearReadingTimer();
       this.readingTimer = setTimeout(() => {
         if (session !== this.sessionRef) return;
         console.warn("[Tafsir TTS] Watchdog timeout - advancing anyway");
         finish();
-      }, Math.max(6000, chunk.length * 110));
+      }, Math.max(8000, chunk.length * (isUrdu ? 140 : 110) / rate));
 
       Speech.speak(chunk, {
         language,
-        rate: Math.max(0.5, Math.min(1.0, 0.58 * this.state.speed)),
+        voice: voice ?? undefined,
+        rate,
         pitch: 1,
         onDone: () => {
           if (session !== this.sessionRef) return;
@@ -680,9 +832,14 @@ class PlaybackController {
     }, 250);
   }
 
-  private fallbackToTextToSpeech(ayah: Ayah) {
+  private async fallbackToTextToSpeech(ayah: Ayah, session: number) {
+    const voice = await pickBestTtsVoice("en");
+    if (session !== this.sessionRef) return;
+    if (!this.state.playing) return;
+    console.log(`[English Audio] Reading translation with voice ${voice ?? "system default"}`);
     Speech.speak(ayah.translation, {
       language: "en-US",
+      voice: voice ?? undefined,
       rate: Math.min(1.0, 0.62 * this.state.speed),
       pitch: 1,
       onDone: () => {
