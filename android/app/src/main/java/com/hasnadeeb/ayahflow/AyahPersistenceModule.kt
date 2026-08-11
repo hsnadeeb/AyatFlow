@@ -100,6 +100,29 @@ class AyahPersistenceModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun openAyatFlowFolder(promise: Promise) {
+        try {
+            val dir = File(sharedStorageRoot(), legacyRootDir)
+            dir.mkdirs()
+
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(Uri.fromFile(dir), "resource/folder")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            if (intent.resolveActivity(appContext.packageManager) != null) {
+                appContext.startActivity(intent)
+                promise.resolve(true)
+            } else {
+                promise.resolve(false)
+            }
+        } catch (e: Exception) {
+            promise.reject("OPEN_FOLDER_FAILED", e.message, e)
+        }
+    }
+
     /** Whether the AyatFlow folder already exists on shared storage. */
     @ReactMethod
     fun isAyatFlowFolderPresent(promise: Promise) {

@@ -85,11 +85,12 @@ class AyatWidgetModule(reactContext: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
-    fun setAudioPrefs(arabic: Boolean, english: Boolean) {
+    fun setAudioPrefs(arabic: Boolean, english: Boolean, tafsir: Boolean) {
         try {
             sharedPrefs.edit()
                 .putBoolean("audioArabic", arabic)
                 .putBoolean("audioEnglish", english)
+                .putBoolean("audioTafsir", tafsir)
                 .apply()
         } catch (e: Exception) {
             e.printStackTrace()

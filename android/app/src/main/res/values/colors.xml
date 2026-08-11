@@ -2,4 +2,26 @@
   <color name="splashscreen_background">#0A5C52</color>
   <color name="iconBackground">#0A5C52</color>
   <color name="colorPrimary">#023c69</color>
+
+  <color name="widget_accent_dark">#2BB5A5</color>
+  <color name="widget_muted_dark">#9BA1A6</color>
+  <color name="widget_text_dark">#F2F1EC</color>
+  <color name="widget_secondary_dark">#A8A8B0</color>
+  <color name="widget_surface_dark">#14171B</color>
+  <color name="widget_surface_alt_dark">#232A30</color>
+  <color name="widget_chip_active_dark">#153E39</color>
+  <color name="widget_chip_inactive_dark">#2A2E32</color>
+  <color name="widget_control_tint_dark">#E8E8EE</color>
+  <color name="widget_play_button_dark">#F7F7F7</color>
+
+  <color name="widget_accent_light">#0F766E</color>
+  <color name="widget_muted_light">#6B7280</color>
+  <color name="widget_text_light">#111827</color>
+  <color name="widget_secondary_light">#4B5563</color>
+  <color name="widget_surface_light">#F8FAFC</color>
+  <color name="widget_surface_alt_light">#E2E8F0</color>
+  <color name="widget_chip_active_light">#CCFBF1</color>
+  <color name="widget_chip_inactive_light">#E5E7EB</color>
+  <color name="widget_control_tint_light">#374151</color>
+  <color name="widget_play_button_light">#FFFFFF</color>
 </resources>

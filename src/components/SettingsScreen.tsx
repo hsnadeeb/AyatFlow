@@ -1,17 +1,19 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
-  Image
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Surah } from "../api";
 import { AudioPrefs } from "../storage";
 import { radii, serif, ThemeMode, useTheme, useThemedStyles } from "../theme";
 import { getDownloadManager } from "../downloadManager";
+import { ensureSharedStoragePermission, openAyatFlowFolder } from "../sharedStorage";
 
 
 
@@ -105,6 +107,23 @@ export default function SettingsScreen({ audioPrefs, surahs, onToggleAudio, onOp
     [setMode]
   );
 
+  const onOpenAyatFlowFolder = useCallback(async () => {
+    try {
+      const hasPermission = await ensureSharedStoragePermission();
+      if (!hasPermission) {
+        Alert.alert("Ayat Flow", "Please grant storage access so the AyatFlow folder can be opened.");
+        return;
+      }
+
+      const opened = await openAyatFlowFolder();
+      if (!opened) {
+        Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened from this device. You can still find it in shared storage.");
+      }
+    } catch {
+      Alert.alert("Ayat Flow", "The AyatFlow folder could not be opened right now.");
+    }
+  }, []);
+
   return (
     <View style={styles.screen}>
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -174,6 +193,16 @@ export default function SettingsScreen({ audioPrefs, surahs, onToggleAudio, onOp
             right={
               <Pressable style={styles.actionBtn} onPress={onOpenDownloadAll} accessibilityRole="button">
                 <Text style={styles.actionBtnText}>{surahs.length > 0 ? "Download" : "Preparing…"}</Text>
+              </Pressable>
+            }
+          />
+          <View style={styles.cardDivider} />
+          <Row
+            label="Open AyatFlow folder"
+            sub="Browse the mirrored downloads, bookmarks, and backup files"
+            right={
+              <Pressable style={styles.actionBtn} onPress={onOpenAyatFlowFolder} accessibilityRole="button">
+                <Text style={styles.actionBtnText}>Open</Text>
               </Pressable>
             }
           />

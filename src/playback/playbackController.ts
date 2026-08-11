@@ -250,7 +250,7 @@ class PlaybackController {
       this.state.progress = savedProgress;
       this.state.audioPrefs = savedAudioPrefs;
       this.initialized = true;
-      setAudioPrefsForWidget(savedAudioPrefs.arabic, savedAudioPrefs.english);
+      setAudioPrefsForWidget(savedAudioPrefs.arabic, savedAudioPrefs.english, savedAudioPrefs.tafsir);
       this.emit();
     })();
     return this.initPromise;
@@ -338,6 +338,8 @@ class PlaybackController {
       this.toggleAudio("arabic");
     } else if (action === "toggleEnglish") {
       this.toggleAudio("english");
+    } else if (action === "toggleTafsir") {
+      this.toggleAudio("tafsir");
     }
   }
 
@@ -957,7 +959,7 @@ class PlaybackController {
           : { ...prev, tafsir: !prev.tafsir };
     this.state.audioPrefs = next;
     saveAudioPrefs(next);
-    setAudioPrefsForWidget(next.arabic, next.english);
+    setAudioPrefsForWidget(next.arabic, next.english, next.tafsir);
     if (this.state.playing && this.state.stage === stage) {
       if (stage === "arabic") this.startArabic();
       else if (stage === "english") this.startEnglish();

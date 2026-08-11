@@ -59,10 +59,10 @@ export function setWidgetPlayingState(isPlaying: boolean) {
   }
 }
 
-export function setAudioPrefsForWidget(arabic: boolean, english: boolean) {
+export function setAudioPrefsForWidget(arabic: boolean, english: boolean, tafsir: boolean) {
   if (Platform.OS === 'android' && AyahWidgetModule?.setAudioPrefs) {
     try {
-      AyahWidgetModule.setAudioPrefs(arabic, english);
+      AyahWidgetModule.setAudioPrefs(arabic, english, tafsir);
     } catch (error) {
       console.error('Failed to set widget audio prefs:', error);
     }

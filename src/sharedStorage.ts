@@ -18,12 +18,32 @@ export const sharedStorage =
 export async function ensureSharedStoragePermission(): Promise<boolean> {
   if (!sharedStorage) return false;
   const sdk = Number(Platform.Version ?? 99);
-  if (sdk >= 30) return true;
+
+  if (sdk >= 30) {
+    try {
+      const hasAccess = await sharedStorage.hasAllFilesAccess();
+      if (hasAccess) return true;
+      await sharedStorage.requestAllFilesAccess();
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   try {
     const granted = await PermissionsAndroid.request(
       PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
     );
     return granted === PermissionsAndroid.RESULTS.GRANTED;
+  } catch {
+    return false;
+  }
+}
+
+export async function openAyatFlowFolder(): Promise<boolean> {
+  if (!sharedStorage) return false;
+  try {
+    return (await sharedStorage.openAyatFlowFolder()) === true;
   } catch {
     return false;
   }
